@@ -14,7 +14,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
-	"gopkg.in/yaml.v3"
 
 	"github.com/nunocgoncalves/forge/internal/config"
 	"github.com/nunocgoncalves/forge/internal/k3s"
@@ -233,8 +232,8 @@ func (p *SSHProvisioner) ReadState(ctx context.Context) (*provisioner.HostState,
 	if out, err := p.run(ctx, "sudo k3s --version"); err == nil {
 		st.Version = parseK3sVersion(out)
 	}
-	if out, err := p.run(ctx, "sudo cat /etc/rancher/k3s/config.yaml"); err == nil {
-		st.ClusterCIDR, st.ServiceCIDR, st.DualStack = parseK3sConfig(out)
+	if out, err := p.run(ctx, "sudo cat /etc/systemd/system/k3s.service"); err == nil {
+		st.ClusterCIDR, st.ServiceCIDR, st.DualStack = parseSystemdUnit(out)
 	}
 	return st, nil
 }
@@ -265,18 +264,21 @@ func parseK3sVersion(out string) string {
 	return strings.TrimSpace(out)
 }
 
-func parseK3sConfig(out string) (clusterCIDR, serviceCIDR string, dualStack bool) {
-	var m map[string]any
-	if err := yaml.Unmarshal([]byte(out), &m); err != nil {
-		return "", "", false
+func parseSystemdUnit(out string) (clusterCIDR, serviceCIDR string, dualStack bool) {
+	tokens := strings.Fields(out)
+	for i, tok := range tokens {
+		switch {
+		case tok == "--cluster-cidr" && i+1 < len(tokens):
+			clusterCIDR = tokens[i+1]
+		case strings.HasPrefix(tok, "--cluster-cidr="):
+			clusterCIDR = strings.TrimPrefix(tok, "--cluster-cidr=")
+		case tok == "--service-cidr" && i+1 < len(tokens):
+			serviceCIDR = tokens[i+1]
+		case strings.HasPrefix(tok, "--service-cidr="):
+			serviceCIDR = strings.TrimPrefix(tok, "--service-cidr=")
+		}
 	}
-	if v, ok := m["cluster-cidr"].(string); ok {
-		clusterCIDR = v
-		dualStack = strings.Contains(v, ",")
-	}
-	if v, ok := m["service-cidr"].(string); ok {
-		serviceCIDR = v
-	}
+	dualStack = strings.Contains(clusterCIDR, ",")
 	return clusterCIDR, serviceCIDR, dualStack
 }
 

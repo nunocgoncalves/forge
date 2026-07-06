@@ -226,8 +226,8 @@ func TestReadState_Installed(t *testing.T) {
 			return "/usr/local/bin/k3s\n", 0
 		case "sudo k3s --version":
 			return "k3s version v1.31.5+k3s1 (abcdef)\n", 0
-		case "sudo cat /etc/rancher/k3s/config.yaml":
-			return "cluster-cidr: 10.42.0.0/16,fd42::/48\nservice-cidr: 10.43.0.0/16,fd43::/112\n", 0
+		case "sudo cat /etc/systemd/system/k3s.service":
+			return "[Unit]\nDescription=k3s\n[Service]\nExecStart=/usr/local/bin/k3s server --cluster-cidr 10.42.0.0/16,fd42::/48 --service-cidr 10.43.0.0/16,fd43::/112 --flannel-backend=vxlan --tls-san 10.20.0.10 --disable traefik --disable servicelb --write-kubeconfig-mode 0600\n[Install]\n", 0
 		default:
 			return "", 1
 		}
