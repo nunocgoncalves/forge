@@ -26,6 +26,12 @@ jobs:
         with:
           version: v2.12.2
 
+      - name: goreleaser check
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: v2
+          args: check
+
       - name: build
         run: make build
 

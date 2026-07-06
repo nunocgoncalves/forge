@@ -35,5 +35,8 @@ Thumbs.db
 # Local forge state (kubeconfig + audit) — never commit
 /.forge/
 
+# goreleaser output
+/dist/
+
 # Local config overrides
 /forge.local.yaml
