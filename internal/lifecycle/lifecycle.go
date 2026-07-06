@@ -21,10 +21,10 @@ import (
 type Action int
 
 const (
-	ActionInstall          Action = iota // k3s not installed
-	ActionSkip                           // installed, in sync
-	ActionRefuseUpgrade                  // version changed -> forge upgrade
-	ActionRefuseImmutable                // immutable field changed -> destroy + reapply
+	ActionInstall         Action = iota // k3s not installed
+	ActionSkip                          // installed, in sync
+	ActionRefuseUpgrade                 // version changed -> forge upgrade
+	ActionRefuseImmutable               // immutable field changed -> destroy + reapply
 )
 
 func (a Action) String() string {
