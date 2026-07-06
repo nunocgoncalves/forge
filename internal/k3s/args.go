@@ -17,8 +17,8 @@ func ServerArgs(cfg *config.Cluster) []string {
 	host := cfg.Spec.Hosts[0] // single-node: validated to be exactly one
 
 	args := []string{"server"}
-	args = append(args, "--cluster-cidr", clusterCIDR(k))
-	args = append(args, "--service-cidr", serviceCIDR(k))
+	args = append(args, "--cluster-cidr", DesiredClusterCIDR(k))
+	args = append(args, "--service-cidr", DesiredServiceCIDR(k))
 	args = append(args, "--flannel-backend=vxlan")
 
 	for _, d := range k.Disable {
@@ -52,14 +52,17 @@ func TaintString(t config.Taint) string {
 	return t.Key + "=" + t.Value + ":" + t.Effect
 }
 
-func clusterCIDR(k config.K3s) string {
+// DesiredClusterCIDR returns the cluster CIDR string k3s stores in config.yaml
+// (comma-joined for dual-stack). Used by reconcile to detect immutable drift.
+func DesiredClusterCIDR(k config.K3s) string {
 	if k.DualStack {
 		return k.ClusterCIDR + "," + k.ClusterCIDRv6
 	}
 	return k.ClusterCIDR
 }
 
-func serviceCIDR(k config.K3s) string {
+// DesiredServiceCIDR returns the service CIDR string k3s stores in config.yaml.
+func DesiredServiceCIDR(k config.K3s) string {
 	if k.DualStack {
 		return k.ServiceCIDR + "," + k.ServiceCIDRv6
 	}
