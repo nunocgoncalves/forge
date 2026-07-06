@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,13 +89,7 @@ func TestE2E(t *testing.T) {
 	}
 	t.Logf("apply output:\n%s", out)
 
-	// 6. dual-stack CIDRs present in k3s config
-	remoteCfg := sshRun(t, ip, privKeyPath, "sudo cat /etc/rancher/k3s/config.yaml")
-	if !strings.Contains(remoteCfg, "fd42::/48") {
-		t.Errorf("k3s config missing IPv6 cluster CIDR:\n%s", remoteCfg)
-	}
-
-	// 7. node label present + Ready via the off-host kubeconfig (client-go)
+	// 6. node label + Ready + dual-stack pod CIDRs via the off-host kubeconfig (client-go)
 	kcPath := filepath.Join(forgeHome, runID, "kubeconfig.yaml")
 	checkNodeViaKubeconfig(t, kcPath, runID)
 }
@@ -210,25 +205,6 @@ func sshDial(ip, keyPath string) (*ssh.Client, error) {
 	return ssh.Dial("tcp", ip+":22", cfg)
 }
 
-func sshRun(t *testing.T, ip, keyPath, cmd string) string {
-	t.Helper()
-	client, err := sshDial(ip, keyPath)
-	if err != nil {
-		t.Fatalf("ssh dial: %v", err)
-	}
-	defer client.Close()
-	sess, err := client.NewSession()
-	if err != nil {
-		t.Fatalf("ssh session: %v", err)
-	}
-	defer sess.Close()
-	out, err := sess.CombinedOutput(cmd)
-	if err != nil {
-		t.Fatalf("ssh run %q: %v\n%s", cmd, err, out)
-	}
-	return string(out)
-}
-
 func buildForge(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
@@ -297,14 +273,24 @@ func checkNodeViaKubeconfig(t *testing.T, kcPath, wantLabelValue string) {
 	if err != nil {
 		t.Fatalf("new clientset: %v", err)
 	}
-	nodes, err := cs.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("list nodes: %v", err)
+
+	// Poll briefly: the node and its pod CIDR assignment can lag "Ready" slightly.
+	var node corev1.Node
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		nodes, lerr := cs.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+		if lerr == nil && len(nodes.Items) == 1 {
+			node = nodes.Items[0]
+			if len(node.Spec.PodCIDRs) > 0 {
+				break
+			}
+		}
+		time.Sleep(2 * time.Second)
 	}
-	if len(nodes.Items) != 1 {
-		t.Fatalf("expected 1 node, got %d", len(nodes.Items))
+	if node.Name == "" {
+		t.Fatalf("no node found via kubeconfig")
 	}
-	node := nodes.Items[0]
+
 	ready := false
 	for _, c := range node.Status.Conditions {
 		if c.Type == corev1.NodeReady && c.Status == corev1.ConditionTrue {
@@ -316,5 +302,16 @@ func checkNodeViaKubeconfig(t *testing.T, kcPath, wantLabelValue string) {
 	}
 	if got := node.Labels["e2e.horizonshift.io/run"]; got != wantLabelValue {
 		t.Errorf("node label e2e.horizonshift.io/run = %q, want %q", got, wantLabelValue)
+	}
+	// Dual-stack proof: the node must have an IPv6 pod CIDR.
+	hasV6 := false
+	for _, c := range node.Spec.PodCIDRs {
+		ip := net.ParseIP(strings.SplitN(c, "/", 2)[0])
+		if ip != nil && ip.To4() == nil {
+			hasV6 = true
+		}
+	}
+	if !hasV6 {
+		t.Errorf("node has no IPv6 pod CIDR (dual-stack not active): %v", node.Spec.PodCIDRs)
 	}
 }
