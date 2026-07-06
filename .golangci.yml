@@ -1,0 +1,32 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosec
+    - gocyclo
+    - gocritic
+    - misspell
+  settings:
+    gocyclo:
+      min-complexity: 15
+  exclusions:
+    presets:
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - "test/e2e"
+      - "_test\\.go"
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
