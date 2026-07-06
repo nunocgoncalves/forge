@@ -1,4 +1,4 @@
-.PHONY: build test test-unit lint fmt install-hooks clean
+.PHONY: build test test-unit test-e2e lint fmt fmt-check install-hooks clean
 
 BINARY := bin/forge
 GO := go
@@ -18,6 +18,9 @@ test: test-unit
 
 test-unit:
 	$(GO) test -race -count=1 ./...
+
+test-e2e:
+	cd test/e2e && go test -race -count=1 .
 
 lint:
 	golangci-lint run ./...
