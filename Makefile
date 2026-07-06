@@ -1,8 +1,12 @@
 .PHONY: build test test-unit test-e2e lint fmt fmt-check install-hooks clean
 
+# Load .env if present (e.g. DIGITALOCEAN_TOKEN for e2e). .env is gitignored.
+-include .env
+export
+
 BINARY := bin/forge
 GO := go
-GOFLAGS := -trimpath
+GOBUILDFLAGS := -trimpath
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
@@ -12,7 +16,7 @@ LDFLAGS := -X github.com/nunocgoncalves/forge/internal/version.version=$(VERSION
            -X github.com/nunocgoncalves/forge/internal/version.date=$(DATE)
 
 build:
-	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/forge
+	$(GO) build $(GOBUILDFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/forge
 
 test: test-unit
 
