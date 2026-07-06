@@ -227,3 +227,24 @@ func TestApply_KubeconfigOut(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(kc), "https://10.20.0.10:6443")
 }
+
+func TestUpgrade(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), state: inSyncState(), kubeconfig: []byte(minKubeconfig), ready: true}
+	p.pf.Installed = true
+	res, err := Upgrade(context.Background(), testConfig(), p, "v1.32.0+k3s1", ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Len(t, p.installs, 1) // Upgrade delegates to Install
+	assert.Equal(t, "v1.32.0+k3s1", p.installs[0].version)
+	assert.True(t, res.NodeReady)
+}
+
+func TestUpgrade_NotInstalled(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf()} // not installed
+	_, err := Upgrade(context.Background(), testConfig(), p, "v1.32.0", ApplyOpts{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not installed")
+}
