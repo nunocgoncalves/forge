@@ -5,26 +5,22 @@
 // tests use fakes. Lifecycle logic must never talk to SSH directly.
 package provisioner
 
-import (
-	"context"
+import "context"
 
-	"github.com/nunocgoncalves/forge/internal/config"
-)
-
-// HostState is the actual state of k3s on a host, read for reconcile.
+// HostState is the actual host-level state of k3s, read for reconcile.
+// Node-level state (labels/taints) is applied at install time via k3s flags in
+// v1 and reconciled via the API in a later version.
 type HostState struct {
-	Installed   bool              // k3s is installed on the host
-	Version     string            // k3s version, e.g. "v1.31.5+k3s1"
-	ClusterCIDR string            // as stored in config.yaml (comma-joined for dual-stack)
+	Installed   bool   // k3s is installed on the host
+	Version     string // k3s version, e.g. "v1.31.5+k3s1"
+	ClusterCIDR string // as stored in config.yaml (comma-joined for dual-stack)
 	ServiceCIDR string
 	DualStack   bool
-	Labels      map[string]string // current node labels
-	Taints      []config.Taint    // current node taints
 }
 
 // PreflightResult is the read-only host readiness check outcome.
 type PreflightResult struct {
-	OS         string // e.g. "Ubuntu 24.04"
+	OS         string // e.g. "Ubuntu 24.04 LTS"
 	HasSudo    bool   // passwordless sudo works
 	HasCurl    bool   // curl present (install script dependency)
 	HasSystemd bool   // systemd present (k3s is a systemd unit)
@@ -45,6 +41,8 @@ type Provisioner interface {
 	Uninstall(ctx context.Context) error
 	// FetchKubeconfig reads /etc/rancher/k3s/k3s.yaml from the host.
 	FetchKubeconfig(ctx context.Context) ([]byte, error)
-	// ReadState reads the actual k3s state for reconcile.
+	// ReadState reads the actual host-level k3s state for reconcile.
 	ReadState(ctx context.Context) (*HostState, error)
+	// NodeReady reports whether the cluster node is Ready (via remote k3s kubectl).
+	NodeReady(ctx context.Context) (bool, error)
 }
