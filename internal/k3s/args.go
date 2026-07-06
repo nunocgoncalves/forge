@@ -20,6 +20,7 @@ func ServerArgs(cfg *config.Cluster) []string {
 	args = append(args, "--cluster-cidr", DesiredClusterCIDR(k))
 	args = append(args, "--service-cidr", DesiredServiceCIDR(k))
 	args = append(args, "--flannel-backend=vxlan")
+	args = append(args, "--tls-san", host.Address) // so the off-host kubeconfig verifies
 
 	for _, d := range k.Disable {
 		args = append(args, "--disable", d)

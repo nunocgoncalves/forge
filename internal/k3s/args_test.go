@@ -87,6 +87,12 @@ func TestServerArgs_Taints(t *testing.T) {
 	assert.Contains(t, args, "dedicated:NoSchedule")
 }
 
+func TestServerArgs_TLSSAN(t *testing.T) {
+	args := ServerArgs(cfg())
+	assert.Contains(t, args, "--tls-san")
+	assert.Contains(t, args, "10.20.0.10")
+}
+
 func TestServerArgs_WriteKubeconfigMode(t *testing.T) {
 	args := ServerArgs(cfg())
 	assert.Contains(t, args, "--write-kubeconfig-mode")
