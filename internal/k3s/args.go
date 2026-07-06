@@ -3,6 +3,7 @@ package k3s
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/nunocgoncalves/forge/internal/config"
 )
@@ -36,6 +37,17 @@ func ServerArgs(cfg *config.Cluster) []string {
 	args = append(args, "--write-kubeconfig-mode", "0600")
 	args = append(args, k.ExtraArgs...)
 	return args
+}
+
+// ResolveVersion returns a full k3s release tag, appending "+k3s1" when the
+// version has no k3s patch suffix. k3s release tags are e.g. "v1.31.5+k3s1";
+// the bare "v1.31.5" is not a valid download tag and makes the install script
+// fail with "Download failed".
+func ResolveVersion(v string) string {
+	if strings.Contains(v, "+") {
+		return v
+	}
+	return v + "+k3s1"
 }
 
 // InstallEnv returns environment variables for the k3s install script.

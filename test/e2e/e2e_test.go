@@ -261,7 +261,7 @@ spec:
       labels:
         e2e.horizonshift.io/run: "%s"
   k3s:
-    version: v1.31.5
+    version: v1.31.5+k3s1
     clusterCIDR: 10.42.0.0/16
     serviceCIDR: 10.43.0.0/16
     dualStack: true

@@ -197,7 +197,7 @@ func (p *SSHProvisioner) Preflight(ctx context.Context) (*provisioner.PreflightR
 // Install implements provisioner.Provisioner.
 func (p *SSHProvisioner) Install(ctx context.Context, version string, serverArgs []string) error {
 	cmd := fmt.Sprintf("curl -sfL %s | sudo env INSTALL_K3S_VERSION=%s sh -s - %s",
-		k3s.InstallScriptURL, shellQuote(version), joinArgs(serverArgs))
+		k3s.InstallScriptURL, shellQuote(k3s.ResolveVersion(version)), joinArgs(serverArgs))
 	_, err := p.run(ctx, cmd)
 	return err
 }

@@ -104,6 +104,12 @@ func TestServerArgs_ExtraArgs(t *testing.T) {
 	assert.Contains(t, args, "--egress-gateway-mode=true")
 }
 
+func TestResolveVersion(t *testing.T) {
+	assert.Equal(t, "v1.31.5+k3s1", ResolveVersion("v1.31.5"))
+	assert.Equal(t, "v1.31.5+k3s1", ResolveVersion("v1.31.5+k3s1"))
+	assert.Equal(t, "v1.31.5+k3s2", ResolveVersion("v1.31.5+k3s2"))
+}
+
 func TestInstallEnv(t *testing.T) {
 	env := InstallEnv("v1.31.5")
 	assert.Equal(t, "v1.31.5", env["INSTALL_K3S_VERSION"])

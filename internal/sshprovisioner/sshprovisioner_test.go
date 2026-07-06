@@ -195,7 +195,7 @@ func TestInstall_CommandShape(t *testing.T) {
 	args := []string{"server", "--cluster-cidr", "10.42.0.0/16,fd42::/48", "--disable", "traefik"}
 	err := p.Install(context.Background(), "v1.31.5", args)
 	require.NoError(t, err)
-	assert.Contains(t, got, "INSTALL_K3S_VERSION='v1.31.5'")
+	assert.Contains(t, got, "INSTALL_K3S_VERSION='v1.31.5+k3s1'")
 	assert.Contains(t, got, "sh -s -")
 	assert.Contains(t, got, "'server'")
 	assert.Contains(t, got, "'--cluster-cidr'")
