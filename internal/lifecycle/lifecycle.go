@@ -179,6 +179,59 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 	return res, nil
 }
 
+// Upgrade re-runs the k3s install script with a new version (in-place upgrade),
+// then refreshes the kubeconfig and waits for the node to be Ready. The host
+// must already have k3s installed (use apply first).
+func Upgrade(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, to string, opts ApplyOpts) (*Result, error) {
+	if opts.ReadyTimeout == 0 {
+		opts.ReadyTimeout = 120 * time.Second
+	}
+	if opts.ReadyInterval == 0 {
+		opts.ReadyInterval = 2 * time.Second
+	}
+
+	st, err := p.ReadState(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read state: %w", err)
+	}
+	if !st.Installed {
+		return nil, fmt.Errorf("k3s not installed; run 'forge apply' first")
+	}
+	if to == "" {
+		to = cfg.Spec.K3s.Version
+	}
+
+	if err := p.Upgrade(ctx, to, k3s.ServerArgs(cfg)); err != nil {
+		auditFail(cfg, "upgrade", err)
+		return nil, err
+	}
+
+	res := &Result{}
+	outPath, err := storeKubeconfig(ctx, cfg, p, opts.KubeconfigOut)
+	if err != nil {
+		auditFail(cfg, "upgrade", err)
+		return nil, err
+	}
+	res.KubeconfigPath = outPath
+
+	ready, err := waitForReady(ctx, p, opts.ReadyTimeout, opts.ReadyInterval)
+	if err != nil {
+		auditFail(cfg, "upgrade", err)
+		return nil, err
+	}
+	res.NodeReady = ready
+	if !ready {
+		err = fmt.Errorf("node not ready after %s", opts.ReadyTimeout)
+		auditFail(cfg, "upgrade", err)
+		return nil, err
+	}
+
+	_ = artifacts.AppendAudit(cfg.Metadata.Name, artifacts.AuditRecord{
+		Action: "upgrade", Result: "success", Version: version.String(),
+	})
+	return res, nil
+}
+
 // storeKubeconfig fetches the kubeconfig from the host, rewrites the server
 // URL for off-host use, and writes it to outPath (or the per-install
 // artifacts dir when outPath is empty). Returns the final path.
