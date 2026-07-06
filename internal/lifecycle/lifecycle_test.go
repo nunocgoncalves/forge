@@ -187,9 +187,9 @@ func TestApply_DryRun(t *testing.T) {
 	res, err := Apply(context.Background(), testConfig(), p, ApplyOpts{DryRun: true})
 	require.NoError(t, err)
 	assert.Equal(t, ActionInstall, res.Plan.Action)
-	assert.Empty(t, p.installs)            // no install
+	assert.Empty(t, p.installs) // no install
 	_, err = os.Stat(filepath.Join(os.Getenv("FORGE_HOME"), "opo1"))
-	assert.True(t, os.IsNotExist(err))     // no artifacts written
+	assert.True(t, os.IsNotExist(err)) // no artifacts written
 }
 
 func TestApply_RefuseImmutable(t *testing.T) {

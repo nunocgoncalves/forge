@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# forge pre-commit hook: fast local checks (gofmt, goimports, vet, lint, build).
+# Install with: make install-hooks   (sets core.hooksPath = .githooks)
+set -euo pipefail
+
+echo "→ gofmt"
+out=$(gofmt -l .)
+if [ -n "$out" ]; then
+  echo "gofmt -l found unformatted files:"
+  echo "$out"
+  exit 1
+fi
+
+if command -v goimports >/dev/null 2>&1; then
+  echo "→ goimports"
+  out=$(goimports -l .)
+  if [ -n "$out" ]; then
+    echo "goimports -l found issues:"
+    echo "$out"
+    exit 1
+  fi
+fi
+
+echo "→ go vet"
+go vet ./...
+
+echo "→ golangci-lint"
+golangci-lint run ./...
+
+echo "→ go build"
+go build ./...

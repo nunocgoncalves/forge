@@ -25,6 +25,9 @@ lint:
 fmt:
 	$(GO) fmt ./...
 
+fmt-check:
+	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+
 install-hooks:
 	git config core.hooksPath .githooks
 
