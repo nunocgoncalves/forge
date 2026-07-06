@@ -25,7 +25,7 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().String("address", "", "target host address")
 	cmd.Flags().String("ssh-user", "forge", "SSH user (must have passwordless sudo)")
 	cmd.Flags().String("ssh-key", "~/.ssh/forge_ed25519", "SSH key path")
-	cmd.Flags().String("k3s-version", "v1.31.5", "k3s version")
+	cmd.Flags().String("k3s-version", "v1.31.5+k3s1", "k3s version (full tag, e.g. v1.31.5+k3s1)")
 	cmd.Flags().Bool("dual-stack", true, "enable dual-stack IPv4+IPv6")
 	cmd.Flags().Bool("force", false, "overwrite an existing config")
 	return cmd
