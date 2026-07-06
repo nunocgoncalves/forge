@@ -1,0 +1,42 @@
+version: 2
+
+project_name: forge
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: forge
+    main: ./cmd/forge
+    binary: forge
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X github.com/nunocgoncalves/forge/internal/version.version={{.Version}}
+      - -X github.com/nunocgoncalves/forge/internal/version.commit={{.Commit}}
+      - -X github.com/nunocgoncalves/forge/internal/version.date={{.Date}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+sboms:
+  - artifacts: archive
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+# Homebrew tap: deferred. goreleaser deprecated the `brews` section; the tap
+# will be added once the replacement stabilizes (or via a manual formula).
