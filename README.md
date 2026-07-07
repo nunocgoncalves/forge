@@ -6,7 +6,7 @@
 
 ## Status
 
-Walking skeleton (HOR-238). Implements single-node k3s bootstrap + the `forge` CLI. The platform Helm umbrella chart, GPU/vLLM backend, Flux, and the overlay repo are deferred to follow-on tickets (HOR-239, HOR-240).
+Walking skeleton (HOR-238). Implements single-node k3s bootstrap + the `forge` CLI. The platform Helm umbrella chart (HOR-239), GPU node readiness via the NVIDIA GPU Operator (HOR-240), Flux, and the overlay repo are follow-on tickets; the vLLM/SGLang backend is CRD-driven by the control-plane (HOR-306).
 
 ## Install
 
