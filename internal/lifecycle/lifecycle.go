@@ -11,6 +11,7 @@ import (
 
 	"github.com/nunocgoncalves/forge/internal/artifacts"
 	"github.com/nunocgoncalves/forge/internal/config"
+	"github.com/nunocgoncalves/forge/internal/deployer"
 	"github.com/nunocgoncalves/forge/internal/k3s"
 	"github.com/nunocgoncalves/forge/internal/kubeconfig"
 	"github.com/nunocgoncalves/forge/internal/provisioner"
@@ -51,6 +52,7 @@ type ReconcilePlan struct {
 	ImmutableDiff []string
 	HaveVersion   string
 	WantVersion   string
+	ChartVersion  string // platform chart version to apply (empty => skip)
 }
 
 // Result is the outcome of a mutating apply.
@@ -58,6 +60,7 @@ type Result struct {
 	Plan           *ReconcilePlan
 	KubeconfigPath string
 	NodeReady      bool
+	ChartApplied   bool
 }
 
 // ApplyOpts configures an apply run.
@@ -66,6 +69,7 @@ type ApplyOpts struct {
 	DryRun        bool
 	ReadyTimeout  time.Duration // default 120s
 	ReadyInterval time.Duration // default 2s
+	SkipChart     bool          // skip the platform chart phase (k3s-only)
 }
 
 // Plan runs preflight + read-state and returns the reconcile decision. It does
@@ -80,7 +84,7 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 		return nil, fmt.Errorf("preflight: passwordless sudo required for user %q", host.SSHUser)
 	}
 
-	plan := &ReconcilePlan{Preflight: pf, WantVersion: cfg.Spec.K3s.Version}
+	plan := &ReconcilePlan{Preflight: pf, WantVersion: cfg.Spec.K3s.Version, ChartVersion: cfg.Spec.Chart.Version}
 
 	if !pf.Installed {
 		if !pf.HasCurl {
@@ -123,7 +127,7 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 
 // Apply runs Plan and, unless DryRun, executes the install/reconcile, fetches
 // and stores the kubeconfig, and waits for the node to be Ready.
-func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, opts ApplyOpts) (*Result, error) {
+func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, opts ApplyOpts) (*Result, error) {
 	if opts.ReadyTimeout == 0 {
 		opts.ReadyTimeout = 120 * time.Second
 	}
@@ -173,10 +177,39 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		return res, err
 	}
 
+	if err := applyChart(ctx, cfg, d, opts, res); err != nil {
+		return res, err
+	}
+
 	_ = artifacts.AppendAudit(cfg.Metadata.Name, artifacts.AuditRecord{
 		Action: "apply", Result: "success", Version: version.String(),
 	})
 	return res, nil
+}
+
+// applyChart runs the platform chart phase (helm upgrade --install) when a chart
+// version is configured and the phase is not skipped. No-op otherwise.
+func applyChart(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result) error {
+	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" {
+		return nil
+	}
+	ch := cfg.Spec.Chart
+	if err := d.Apply(ctx, ch.Release, ch.Repository, ch.Version, ch.Namespace); err != nil {
+		auditFail(cfg, "apply", err)
+		return fmt.Errorf("chart: %w", err)
+	}
+	res.ChartApplied = true
+	return nil
+}
+
+// Destroy removes the platform chart (if configured) and then uninstalls k3s.
+// Chart removal is best-effort so destroy always proceeds to substrate removal.
+func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer) error {
+	if d != nil && cfg.Spec.Chart.Version != "" {
+		ch := cfg.Spec.Chart
+		_ = d.UninstallChart(ctx, ch.Release, ch.Namespace)
+	}
+	return p.Uninstall(ctx)
 }
 
 // Upgrade re-runs the k3s install script with a new version (in-place upgrade),

@@ -21,6 +21,7 @@ destroy' then 'forge apply'); version changes are routed to 'forge upgrade'.`,
 		RunE: runApply,
 	}
 	cmd.Flags().Bool("dry-run", false, "preflight and print the plan without mutating")
+	cmd.Flags().Bool("skip-chart", false, "skip the platform chart phase (k3s only)")
 	cmd.Flags().String("kubeconfig-out", "", "path to write the fetched kubeconfig (default ~/.forge/<install>/kubeconfig.yaml)")
 	return cmd
 }
@@ -51,8 +52,9 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	}
 
 	kcOut, _ := cmd.Flags().GetString("kubeconfig-out")
+	skipChart, _ := cmd.Flags().GetBool("skip-chart")
 	log.Info("applying", "install", cfg.Metadata.Name)
-	res, err := lifecycle.Apply(ctx, cfg, p, lifecycle.ApplyOpts{KubeconfigOut: kcOut})
+	res, err := lifecycle.Apply(ctx, cfg, p, p, lifecycle.ApplyOpts{KubeconfigOut: kcOut, SkipChart: skipChart})
 	if err != nil {
 		return err
 	}
@@ -61,6 +63,10 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(out, "  action:     %s\n", res.Plan.Action)
 	fmt.Fprintf(out, "  kubeconfig: %s\n", res.KubeconfigPath)
 	fmt.Fprintf(out, "  node ready: %v\n", res.NodeReady)
+	if cfg.Spec.Chart.Version != "" {
+		fmt.Fprintf(out, "  chart:      %s\n", cfg.Spec.Chart.Version)
+		fmt.Fprintf(out, "  chart applied: %v\n", res.ChartApplied)
+	}
 	return nil
 }
 
@@ -79,4 +85,7 @@ func printPlan(cmd *cobra.Command, plan *lifecycle.ReconcilePlan) {
 		fmt.Fprintf(out, "  have:      %s\n", plan.HaveVersion)
 	}
 	fmt.Fprintf(out, "  want:      %s\n", plan.WantVersion)
+	if plan.ChartVersion != "" {
+		fmt.Fprintf(out, "  chart:     %s\n", plan.ChartVersion)
+	}
 }

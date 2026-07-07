@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,16 +83,23 @@ func TestE2E(t *testing.T) {
 	forgeHome := t.TempDir()
 	cfgPath := writeForgeConfig(t, runID, ip, privKeyPath)
 
-	// 5. forge apply
+	// 5. forge apply (k3s + platform chart via helm)
 	out := runForge(t, forgeBin, forgeHome, "apply", "--config", cfgPath)
 	if !strings.Contains(out, "node ready: true") {
 		t.Fatalf("apply did not report node ready:\n%s", out)
+	}
+	if !strings.Contains(out, "chart applied: true") {
+		t.Fatalf("apply did not report chart applied:\n%s", out)
 	}
 	t.Logf("apply output:\n%s", out)
 
 	// 6. node label + Ready + dual-stack pod CIDRs via the off-host kubeconfig (client-go)
 	kcPath := filepath.Join(forgeHome, runID, "kubeconfig.yaml")
 	checkNodeViaKubeconfig(t, kcPath, runID)
+
+	// 7. gateway pod Running + /health 200 through ingress (hostNetwork on the VM IP)
+	checkGatewayRunning(t, kcPath)
+	checkGatewayHealth(t, ip)
 }
 
 func generateKey(t *testing.T) (pubKeyStr, privKeyPath string) {
@@ -244,6 +252,8 @@ spec:
     clusterCIDRv6: fd42::/48
     serviceCIDRv6: fd43::/112
     disable: [traefik, servicelb]
+  chart:
+    version: 0.1.0
 `, name, ip, keyPath, name)
 	p := filepath.Join(t.TempDir(), "forge.yaml")
 	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
@@ -314,4 +324,45 @@ func checkNodeViaKubeconfig(t *testing.T, kcPath, wantLabelValue string) {
 	if !hasV6 {
 		t.Errorf("node has no IPv6 pod CIDR (dual-stack not active): %v", node.Spec.PodCIDRs)
 	}
+}
+
+func checkGatewayRunning(t *testing.T, kcPath string) {
+	t.Helper()
+	restCfg, err := clientcmd.BuildConfigFromFlags("", kcPath)
+	if err != nil {
+		t.Fatalf("build kubeconfig: %v", err)
+	}
+	cs, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		t.Fatalf("new clientset: %v", err)
+	}
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		pods, lerr := cs.CoreV1().Pods("iterabase-system").List(context.Background(), metav1.ListOptions{
+			LabelSelector: "app.kubernetes.io/name=inference-gateway",
+		})
+		if lerr == nil && len(pods.Items) > 0 && pods.Items[0].Status.Phase == corev1.PodRunning {
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("inference-gateway pod not Running in iterabase-system")
+}
+
+func checkGatewayHealth(t *testing.T, ip string) {
+	t.Helper()
+	url := fmt.Sprintf("http://%s/health", ip)
+	client := &http.Client{Timeout: 10 * time.Second}
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("gateway /health not 200 via %s", url)
 }

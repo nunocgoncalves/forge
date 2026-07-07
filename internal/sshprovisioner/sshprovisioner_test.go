@@ -304,3 +304,111 @@ func TestUninstall(t *testing.T) {
 	require.NoError(t, p.Uninstall(context.Background()))
 	assert.Equal(t, "sudo /usr/local/bin/k3s-uninstall.sh", got)
 }
+
+func TestDeployer_Apply(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v helm":
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "upgrade"):
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.Apply(context.Background(), "opo1",
+		"oci://ghcr.io/nunocgoncalves/iterabase-platform", "0.1.0", "iterabase-system"))
+}
+
+func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v helm":
+			return "", 1 // absent
+		case strings.Contains(cmd, "get-helm-3"):
+			return "", 0 // install script
+		case strings.Contains(cmd, "upgrade"):
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.Apply(context.Background(), "opo1",
+		"oci://ghcr.io/nunocgoncalves/iterabase-platform", "0.1.0", "iterabase-system"))
+}
+
+func TestDeployer_Status(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v helm":
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "status"):
+			return `{"info":{"status":"deployed"},"chart":{"metadata":{"version":"0.1.0"}}}`, 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	st, err := p.Status(context.Background(), "opo1", "iterabase-system")
+	require.NoError(t, err)
+	assert.True(t, st.Installed)
+	assert.Equal(t, "deployed", st.Status)
+	assert.Equal(t, "0.1.0", st.Version)
+}
+
+func TestDeployer_Status_NotInstalled(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v helm":
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "status"):
+			return "", 1 // release not found
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	st, err := p.Status(context.Background(), "opo1", "iterabase-system")
+	require.NoError(t, err)
+	assert.False(t, st.Installed)
+}
+
+func TestDeployer_UninstallChart(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v helm":
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "uninstall"):
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.UninstallChart(context.Background(), "opo1", "iterabase-system"))
+}
+
+func TestDeployer_UninstallChart_HelmAbsent(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		if cmd == "command -v helm" {
+			return "", 1 // absent
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.UninstallChart(context.Background(), "opo1", "iterabase-system"))
+}
