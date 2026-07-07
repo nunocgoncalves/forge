@@ -179,11 +179,12 @@ func mustBin(t *testing.T, name string) {
 }
 
 // run executes a command with a generous timeout and fails the test on error,
-// returning combined stdout. The 10m cap exceeds the longest --wait/--timeout
-// passed in args (helm --timeout 5m, kubectl wait --timeout).
+// returning combined stdout. The 15m cap is a backstop; long waits are bounded
+// by their own flags (helm --timeout 5m, kubectl wait --timeout) so this only
+// guards against a truly hung operation.
 func run(t *testing.T, name string, args ...string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()

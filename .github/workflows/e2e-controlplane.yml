@@ -35,11 +35,8 @@ jobs:
           curl -sSL -o /usr/local/bin/kubectl https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl
           chmod +x /usr/local/bin/kubectl
 
-      # Gated off until the control-plane chart ships (HOR-316). The test skips
-      # fast without CONTROL_PLANE_E2E set; this still validates that the
-      # harness compiles and the toolchain installs in CI. Set the env below to
-      # "1" once HOR-316 is merged + the chart is published.
+      # The control-plane chart (HOR-316) is published at
+      # oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane. The test
+      # installs it into a Kind cluster and exercises the identity flow.
       - name: control-plane identity e2e
         run: make test-e2e-controlplane
-        env:
-          CONTROL_PLANE_E2E: "" # TODO(HOR-316): set to "1" once the chart ships

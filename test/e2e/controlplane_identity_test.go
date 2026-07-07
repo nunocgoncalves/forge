@@ -31,27 +31,24 @@ import (
 // (PermissionPolicy / Model / ModelBackend / AgentSandbox): the reusable
 // harness lives in test/e2e/internal/kindtest.
 //
-// PREREQUISITE: gated behind CONTROL_PLANE_E2E=1. The control-plane Helm chart
-// must ship first (HOR-316, iterabase-charts). Until then this test skips, but
-// compiling it validates the harness and the CI toolchain. Flip the gate (set
-// CONTROL_PLANE_E2E=1 in the e2e-controlplane workflow) once HOR-316 is done.
+// The control-plane chart (HOR-316) is published at
+// oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane with its pgvector
+// Postgres dependency baked in. Override the version/image via env for local dev
+// (CONTROL_PLANE_LOCAL_CHART points at a checkout; CONTROL_PLANE_LOCAL_IMAGE
+// loads a locally-built image into the Kind nodes).
 func TestControlPlaneIdentity(t *testing.T) {
-	if os.Getenv("CONTROL_PLANE_E2E") == "" {
-		t.Skip("CONTROL_PLANE_E2E not set; skipping until the control-plane chart ships (prereq HOR-316)")
-	}
-
 	// --- chart config (env-overridable) ---
 	chartRef := envOr("CONTROL_PLANE_CHART", "oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane")
-	chartVersion := envOr("CONTROL_PLANE_CHART_VERSION", "0.1.0")
+	chartVersion := envOr("CONTROL_PLANE_CHART_VERSION", "0.2.1")
 	localChart := os.Getenv("CONTROL_PLANE_LOCAL_CHART") // optional local path for dev
 	imageRepo := envOr("CONTROL_PLANE_IMAGE_REPO", "ghcr.io/nunocgoncalves/control-plane")
-	imageTag := envOr("CONTROL_PLANE_IMAGE_TAG", "v0.0.1")
+	imageTag := envOr("CONTROL_PLANE_IMAGE_TAG", "0.0.2")
 
 	namespace := "control-plane-system"
 	release := "cp"
 
-	// TODO(HOR-316): confirm these chart-specific names against the shipped
-	// chart's templates/labels/values. They are the only chart-coupled bits.
+	// Chart-coupled names (confirmed against the shipped control-plane chart,
+	// HOR-316). These are the only chart-specific bits; everything else is flow.
 	const (
 		apiSelector   = "app.kubernetes.io/component=api" // api pod label selector
 		bootstrapCont = "bootstrap"                       // init container that prints keys
@@ -68,8 +65,7 @@ func TestControlPlaneIdentity(t *testing.T) {
 	}
 
 	// 2. helm install. Values configure a self-contained, pgvector-backed,
-	//    enrolled-mode install. Exact value keys are chart-specific and must be
-	//    aligned with the chart's values.yaml when HOR-316 ships.
+	//    enrolled-mode install. Value keys match the shipped chart's values.yaml.
 	values := map[string]string{
 		"image.repository":             imageRepo,
 		"image.tag":                    imageTag,
