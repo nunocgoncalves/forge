@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-controlplane lint fmt fmt-check install-hooks clean
+.PHONY: build test test-unit test-e2e test-e2e-controlplane test-e2e-gpu lint fmt fmt-check install-hooks clean
 
 # Load .env if present (e.g. DIGITALOCEAN_TOKEN for e2e). .env is gitignored.
 -include .env
@@ -28,6 +28,9 @@ test-e2e:
 
 test-e2e-controlplane:
 	cd test/e2e && go test -race -count=1 -timeout 15m -run TestControlPlaneIdentity ./...
+
+test-e2e-gpu:
+	cd test/e2e && go test -race -count=1 -timeout 45m -run TestGPUE2E .
 
 lint:
 	golangci-lint run ./...
