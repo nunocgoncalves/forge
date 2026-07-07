@@ -90,9 +90,35 @@ type Overlay struct {
 	Path   string `yaml:"path"`
 }
 
-// Chart is the (reserved) platform umbrella chart version.
+// Chart is the platform umbrella chart pull pointer. An empty Version means
+// the chart phase is skipped (k3s-only). Defaults are applied in Validate.
 type Chart struct {
-	Version string `yaml:"version"`
+	Repository string `yaml:"repository"` // OCI URL, e.g. oci://ghcr.io/.../iterabase-platform
+	Version    string `yaml:"version"`    // chart version (semver) to install; empty => skip chart
+	Release    string `yaml:"release"`    // helm release name (default: metadata.name)
+	Namespace  string `yaml:"namespace"`  // target namespace (default: iterabase-system)
+}
+
+const (
+	defaultChartRepository = "oci://ghcr.io/nunocgoncalves/iterabase-platform"
+	defaultChartNamespace  = "iterabase-system"
+)
+
+// applyDefaults fills the chart pull pointer defaults when a chart version is
+// set. With no version, the chart phase is skipped and defaults stay empty.
+func (c *Chart) applyDefaults(install string) {
+	if c.Version == "" {
+		return
+	}
+	if c.Repository == "" {
+		c.Repository = defaultChartRepository
+	}
+	if c.Release == "" {
+		c.Release = install
+	}
+	if c.Namespace == "" {
+		c.Namespace = defaultChartNamespace
+	}
 }
 
 // Load reads and parses a forge.yaml config from path.
@@ -130,6 +156,7 @@ func (c *Cluster) Validate() error {
 	if !nameRe.MatchString(c.Metadata.Name) {
 		return fmt.Errorf("metadata.name %q must be lowercase alphanumeric with hyphens", c.Metadata.Name)
 	}
+	c.Spec.Chart.applyDefaults(c.Metadata.Name)
 	return c.Spec.validate()
 }
 

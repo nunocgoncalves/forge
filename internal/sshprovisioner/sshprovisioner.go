@@ -4,6 +4,7 @@ package sshprovisioner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/nunocgoncalves/forge/internal/config"
+	"github.com/nunocgoncalves/forge/internal/deployer"
 	"github.com/nunocgoncalves/forge/internal/k3s"
 	"github.com/nunocgoncalves/forge/internal/provisioner"
 )
@@ -306,4 +308,90 @@ func joinArgs(args []string) string {
 		parts[i] = shellQuote(a)
 	}
 	return strings.Join(parts, " ")
+}
+
+const (
+	helmInstallScript = "https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3"
+	k3sKubeconfigPath = "/etc/rancher/k3s/k3s.yaml"
+)
+
+// helmCmd builds a sudo helm command targeting the k3s kubeconfig on the host.
+func helmCmd(args ...string) string {
+	return joinArgs(append([]string{"sudo", "helm", "--kubeconfig", k3sKubeconfigPath}, args...))
+}
+
+// ensureHelm installs helm on the host if it is not already present.
+func (p *SSHProvisioner) ensureHelm(ctx context.Context) error {
+	if _, err := p.run(ctx, "command -v helm"); err == nil {
+		return nil
+	}
+	if _, err := p.run(ctx, fmt.Sprintf("curl -fsSL %s | sudo bash", helmInstallScript)); err != nil {
+		return fmt.Errorf("install helm: %w", err)
+	}
+	return nil
+}
+
+// Apply implements deployer.Deployer: idempotent helm upgrade --install of the
+// platform chart, ensuring helm first.
+func (p *SSHProvisioner) Apply(ctx context.Context, release, repository, version, namespace string) error {
+	if err := p.ensureHelm(ctx); err != nil {
+		return err
+	}
+	cmd := helmCmd("upgrade", "--install", release, repository,
+		"--version", version,
+		"-n", namespace,
+		"--create-namespace",
+		"--wait",
+		"--timeout", "10m",
+	)
+	if _, err := p.run(ctx, cmd); err != nil {
+		return fmt.Errorf("helm install: %w", err)
+	}
+	return nil
+}
+
+// Status implements deployer.Deployer. A missing release is {Installed: false},
+// not an error.
+func (p *SSHProvisioner) Status(ctx context.Context, release, namespace string) (*deployer.ChartState, error) {
+	if err := p.ensureHelm(ctx); err != nil {
+		return nil, err
+	}
+	out, err := p.run(ctx, helmCmd("status", release, "-n", namespace, "-o", "json"))
+	if err != nil {
+		return &deployer.ChartState{Installed: false}, nil // release not found
+	}
+	return parseHelmStatus(out)
+}
+
+// UninstallChart implements deployer.Deployer. Best-effort: a missing release
+// (or absent helm) is not an error so destroy always proceeds to k3s removal.
+func (p *SSHProvisioner) UninstallChart(ctx context.Context, release, namespace string) error {
+	if _, err := p.run(ctx, "command -v helm"); err != nil {
+		return nil // helm absent => nothing to remove
+	}
+	_, _ = p.run(ctx, helmCmd("uninstall", release, "-n", namespace)) // best-effort
+	return nil
+}
+
+type helmStatusJSON struct {
+	Info struct {
+		Status string `json:"status"`
+	} `json:"info"`
+	Chart struct {
+		Metadata struct {
+			Version string `json:"version"`
+		} `json:"metadata"`
+	} `json:"chart"`
+}
+
+func parseHelmStatus(out string) (*deployer.ChartState, error) {
+	var hs helmStatusJSON
+	if err := json.Unmarshal([]byte(out), &hs); err != nil {
+		return nil, fmt.Errorf("parse helm status: %w", err)
+	}
+	return &deployer.ChartState{
+		Installed: true,
+		Status:    hs.Info.Status,
+		Version:   hs.Chart.Metadata.Version,
+	}, nil
 }

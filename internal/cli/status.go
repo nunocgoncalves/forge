@@ -49,5 +49,13 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintf(out, "want:       %s\n", plan.WantVersion)
 	fmt.Fprintf(out, "node ready: %v\n", ready)
+	if cfg.Spec.Chart.Version != "" {
+		cs, _ := p.Status(ctx, cfg.Spec.Chart.Release, cfg.Spec.Chart.Namespace)
+		if cs != nil && cs.Installed {
+			fmt.Fprintf(out, "chart:      %s (%s)\n", cs.Version, cs.Status)
+		} else {
+			fmt.Fprintf(out, "chart:      not installed (want %s)\n", cfg.Spec.Chart.Version)
+		}
+	}
 	return nil
 }

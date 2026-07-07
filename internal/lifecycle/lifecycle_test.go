@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/nunocgoncalves/forge/internal/config"
+	"github.com/nunocgoncalves/forge/internal/deployer"
 	"github.com/nunocgoncalves/forge/internal/provisioner"
 )
 
@@ -166,7 +167,7 @@ func TestApply_Install(t *testing.T) {
 		kubeconfig:        []byte(minKubeconfig),
 		readyAfterInstall: true,
 	}
-	res, err := Apply(context.Background(), testConfig(), p, ApplyOpts{
+	res, err := Apply(context.Background(), testConfig(), p, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -184,7 +185,7 @@ func TestApply_Install(t *testing.T) {
 func TestApply_DryRun(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig)}
-	res, err := Apply(context.Background(), testConfig(), p, ApplyOpts{DryRun: true})
+	res, err := Apply(context.Background(), testConfig(), p, nil, ApplyOpts{DryRun: true})
 	require.NoError(t, err)
 	assert.Equal(t, ActionInstall, res.Plan.Action)
 	assert.Empty(t, p.installs) // no install
@@ -198,7 +199,7 @@ func TestApply_RefuseImmutable(t *testing.T) {
 	st.ClusterCIDR = "10.99.0.0/16,fd42::/48"
 	p := &fakeProv{pf: readyPf(), state: st, kubeconfig: []byte(minKubeconfig)}
 	p.pf.Installed = true
-	_, err := Apply(context.Background(), testConfig(), p, ApplyOpts{})
+	_, err := Apply(context.Background(), testConfig(), p, nil, ApplyOpts{})
 	require.Error(t, err)
 	assert.Empty(t, p.installs)
 	assert.Contains(t, err.Error(), "immutable")
@@ -207,7 +208,7 @@ func TestApply_RefuseImmutable(t *testing.T) {
 func TestApply_NodeNotReady(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), ready: false}
-	_, err := Apply(context.Background(), testConfig(), p, ApplyOpts{
+	_, err := Apply(context.Background(), testConfig(), p, nil, ApplyOpts{
 		ReadyTimeout: 100 * time.Millisecond, ReadyInterval: 20 * time.Millisecond,
 	})
 	require.Error(t, err)
@@ -218,7 +219,7 @@ func TestApply_KubeconfigOut(t *testing.T) {
 	useTempHome(t)
 	out := filepath.Join(t.TempDir(), "kc.yaml")
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
-	res, err := Apply(context.Background(), testConfig(), p, ApplyOpts{
+	res, err := Apply(context.Background(), testConfig(), p, nil, ApplyOpts{
 		KubeconfigOut: out, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -247,4 +248,84 @@ func TestUpgrade_NotInstalled(t *testing.T) {
 	_, err := Upgrade(context.Background(), testConfig(), p, "v1.32.0", ApplyOpts{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not installed")
+}
+
+type applyCall struct{ release, repository, version, namespace string }
+type uninstallCall struct{ release, namespace string }
+
+// fakeDeployer is a controllable deployer.Deployer for lifecycle chart tests.
+type fakeDeployer struct {
+	applyCalls     []applyCall
+	uninstallCalls []uninstallCall
+	statusState    deployer.ChartState
+	applyErr       error
+}
+
+func (f *fakeDeployer) Apply(_ context.Context, release, repo, version, ns string) error {
+	f.applyCalls = append(f.applyCalls, applyCall{release, repo, version, ns})
+	return f.applyErr
+}
+func (f *fakeDeployer) Status(_ context.Context, _, _ string) (*deployer.ChartState, error) {
+	s := f.statusState
+	return &s, nil
+}
+func (f *fakeDeployer) UninstallChart(_ context.Context, release, ns string) error {
+	f.uninstallCalls = append(f.uninstallCalls, uninstallCall{release, ns})
+	return nil
+}
+
+func testConfigWithChart() *config.Cluster {
+	c := testConfig()
+	c.Spec.Chart = config.Chart{
+		Version:    "0.1.0",
+		Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
+		Release:    "opo1",
+		Namespace:  "iterabase-system",
+	}
+	return c
+}
+
+func TestApply_Chart(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), testConfigWithChart(), p, d, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.ChartApplied)
+	require.Len(t, d.applyCalls, 1)
+	assert.Equal(t, "0.1.0", d.applyCalls[0].version)
+	assert.Equal(t, "opo1", d.applyCalls[0].release)
+	assert.Equal(t, "iterabase-system", d.applyCalls[0].namespace)
+}
+
+func TestApply_SkipChart(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	_, err := Apply(context.Background(), testConfigWithChart(), p, d, ApplyOpts{
+		SkipChart: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, d.applyCalls)
+}
+
+func TestDestroy_Chart(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	require.NoError(t, Destroy(context.Background(), testConfigWithChart(), p, d))
+	require.Len(t, d.uninstallCalls, 1)
+	assert.Equal(t, "opo1", d.uninstallCalls[0].release)
+	assert.False(t, p.state.Installed) // k3s uninstalled too
+}
+
+func TestDestroy_NoChart(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	require.NoError(t, Destroy(context.Background(), testConfig(), p, d))
+	assert.Empty(t, d.uninstallCalls) // no chart configured
+	assert.False(t, p.state.Installed)
 }

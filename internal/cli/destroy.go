@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/nunocgoncalves/forge/internal/artifacts"
+	"github.com/nunocgoncalves/forge/internal/lifecycle"
 	"github.com/nunocgoncalves/forge/internal/sshprovisioner"
 )
 
@@ -43,7 +44,8 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	}
 	defer p.Close()
 
-	if err := p.Uninstall(context.Background()); err != nil {
+	ctx := context.Background()
+	if err := lifecycle.Destroy(ctx, cfg, p, p); err != nil {
 		return err
 	}
 	if dir, err := artifacts.Dir(cfg.Metadata.Name); err == nil {
