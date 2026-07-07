@@ -170,7 +170,7 @@ func TestParse_ChartDefaults(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	assert.Equal(t, "0.1.0", c.Spec.Chart.Version)
-	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/iterabase-platform", c.Spec.Chart.Repository)
+	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform", c.Spec.Chart.Repository)
 	assert.Equal(t, "opo1", c.Spec.Chart.Release)
 	assert.Equal(t, "iterabase-system", c.Spec.Chart.Namespace)
 }

@@ -30,6 +30,6 @@ spec:
     path: ./overlay
   chart:                       # platform umbrella chart (iterabase-platform); empty version => k3s-only
     version: 0.1.0             # chart version to install (semver)
-    # repository: oci://ghcr.io/nunocgoncalves/iterabase-platform  # default
+    # repository: oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform  # default
     # release: opo1            # default: metadata.name
     # namespace: iterabase-system  # default
