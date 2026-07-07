@@ -24,7 +24,7 @@ test-unit:
 	$(GO) test -race -count=1 ./...
 
 test-e2e:
-	cd test/e2e && go test -race -count=1 -timeout 25m .
+	cd test/e2e && go test -race -count=1 -timeout 25m -run TestE2E .
 
 test-e2e-controlplane:
 	cd test/e2e && go test -race -count=1 -timeout 15m -run TestControlPlaneIdentity ./...
