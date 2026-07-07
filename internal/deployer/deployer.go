@@ -1,9 +1,9 @@
-// Package deployer defines the cluster-level platform chart operations
-// interface — the testability seam for installing/upgrading/uninstalling the
-// iterabase-platform Helm release. The real implementation lives in
-// internal/sshprovisioner (helm runs on the host over SSH, sharing the same
-// transport as the k3s Provisioner); tests use fakes. Lifecycle logic never
-// talks to SSH or helm directly.
+// Package deployer defines the cluster-level Helm release operations
+// interface — the testability seam for installing/upgrading/uninstalling Helm
+// releases (the iterabase-platform chart, the NVIDIA GPU Operator, etc.). The
+// real implementation lives in internal/sshprovisioner (helm runs on the host
+// over SSH, sharing the same transport as the k3s Provisioner); tests use
+// fakes. Lifecycle logic never talks to SSH or helm directly.
 package deployer
 
 import "context"
@@ -20,9 +20,14 @@ type ChartState struct {
 // bound to a single host (the same host the Provisioner bootstrap k3s on); helm
 // runs there over SSH using the k3s kubeconfig.
 type Deployer interface {
-	// Apply idempotently installs or upgrades the platform chart release
-	// (helm upgrade --install). It ensures helm is present on the host first.
-	Apply(ctx context.Context, release, repository, version, namespace string) error
+	// Apply idempotently installs or upgrades a Helm release (helm upgrade
+	// --install), applying the given --set values (empty for the platform chart,
+	// whose values come from the overlay). It ensures helm is present first.
+	Apply(ctx context.Context, release, repository, version, namespace string, values []string) error
+	// EnsureRepo adds (or force-updates) a Helm repository on the host. Needed
+	// for repo-based charts (e.g. the NVIDIA GPU Operator); a no-op concern for
+	// OCI charts. Idempotent.
+	EnsureRepo(ctx context.Context, name, url string) error
 	// Status reads the helm release state. A missing release is not an error.
 	Status(ctx context.Context, release, namespace string) (*ChartState, error)
 	// UninstallChart removes the helm release. A missing release is not an error.

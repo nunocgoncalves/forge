@@ -161,6 +161,10 @@ func TestPreflight(t *testing.T) {
 			return "/usr/local/bin/k3s\n", 0
 		case "ip -6 addr show scope global":
 			return "1: lo ...\n", 0
+		case "grep -qi 0x10de /sys/bus/pci/devices/*/vendor":
+			return "", 0
+		case "test -d /usr/src/linux-headers-$(uname -r)":
+			return "", 0
 		default:
 			return "", 1
 		}
@@ -177,6 +181,8 @@ func TestPreflight(t *testing.T) {
 	assert.True(t, r.HasSystemd)
 	assert.True(t, r.Installed)
 	assert.True(t, r.HasIPv6)
+	assert.True(t, r.HasNVIDIAGPU)
+	assert.True(t, r.KernelHeadersInstalled)
 }
 
 func TestInstall_CommandShape(t *testing.T) {
@@ -306,11 +312,13 @@ func TestUninstall(t *testing.T) {
 }
 
 func TestDeployer_Apply(t *testing.T) {
+	var got string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
 		case cmd == "command -v helm":
 			return "/usr/local/bin/helm\n", 0
 		case strings.Contains(cmd, "upgrade"):
+			got = cmd
 			return "", 0
 		default:
 			return "", 1
@@ -320,7 +328,11 @@ func TestDeployer_Apply(t *testing.T) {
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
 	require.NoError(t, p.Apply(context.Background(), "opo1",
-		"oci://ghcr.io/nunocgoncalves/iterabase-platform", "0.1.0", "iterabase-system"))
+		"oci://ghcr.io/nunocgoncalves/iterabase-platform", "0.1.0", "iterabase-system",
+		[]string{"driver.enabled=true", "toolkit.enabled=true"}))
+	assert.Contains(t, got, "--set")
+	assert.Contains(t, got, "driver.enabled=true")
+	assert.Contains(t, got, "toolkit.enabled=true")
 }
 
 func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
@@ -340,7 +352,7 @@ func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
 	require.NoError(t, p.Apply(context.Background(), "opo1",
-		"oci://ghcr.io/nunocgoncalves/iterabase-platform", "0.1.0", "iterabase-system"))
+		"oci://ghcr.io/nunocgoncalves/iterabase-platform", "0.1.0", "iterabase-system", nil))
 }
 
 func TestDeployer_Status(t *testing.T) {
@@ -411,4 +423,136 @@ func TestDeployer_UninstallChart_HelmAbsent(t *testing.T) {
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
 	require.NoError(t, p.UninstallChart(context.Background(), "opo1", "iterabase-system"))
+}
+
+func TestPreflight_NoGPU(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch cmd {
+		case "cat /etc/os-release":
+			return "PRETTY_NAME=\"Ubuntu 24.04 LTS\"\n", 0
+		case "sudo -n true", "command -v curl", "pidof systemd", "command -v k3s",
+			"ip -6 addr show scope global", "test -d /usr/src/linux-headers-$(uname -r)":
+			return "", 0
+		case "grep -qi 0x10de /sys/bus/pci/devices/*/vendor":
+			return "", 1 // no NVIDIA device
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	r, err := p.Preflight(context.Background())
+	require.NoError(t, err)
+	assert.False(t, r.HasNVIDIAGPU)
+	assert.True(t, r.KernelHeadersInstalled)
+}
+
+func TestPreflight_NoKernelHeaders(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch cmd {
+		case "cat /etc/os-release":
+			return "PRETTY_NAME=\"Ubuntu 24.04 LTS\"\n", 0
+		case "sudo -n true", "command -v curl", "pidof systemd", "command -v k3s",
+			"ip -6 addr show scope global", "grep -qi 0x10de /sys/bus/pci/devices/*/vendor":
+			return "", 0
+		case "test -d /usr/src/linux-headers-$(uname -r)":
+			return "", 1 // headers absent
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	r, err := p.Preflight(context.Background())
+	require.NoError(t, err)
+	assert.True(t, r.HasNVIDIAGPU)
+	assert.False(t, r.KernelHeadersInstalled)
+}
+
+func TestEnsureDriverBuildDeps_CommandShape(t *testing.T) {
+	var got string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		got = cmd
+		if strings.Contains(cmd, "apt-get install -y linux-headers-$(uname -r)") {
+			return "", 0
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.EnsureDriverBuildDeps(context.Background()))
+	assert.Contains(t, got, "apt-get update")
+	assert.Contains(t, got, "apt-get install -y linux-headers-$(uname -r)")
+}
+
+func TestGPUReady(t *testing.T) {
+	const q = "sudo k3s kubectl get clusterpolicy -o jsonpath='{.items[0].status.state}'"
+	t.Run("ready", func(t *testing.T) {
+		addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+			if cmd == q {
+				return "ready", 0
+			}
+			return "", 1
+		})
+		defer cleanup()
+		p := newProvisioner(t, addr, cfg)
+		defer p.Close()
+		ok, err := p.GPUReady(context.Background())
+		require.NoError(t, err)
+		assert.True(t, ok)
+	})
+	t.Run("not ready", func(t *testing.T) {
+		addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+			if cmd == q {
+				return "notReady", 0
+			}
+			return "", 1
+		})
+		defer cleanup()
+		p := newProvisioner(t, addr, cfg)
+		defer p.Close()
+		ok, err := p.GPUReady(context.Background())
+		require.NoError(t, err)
+		assert.False(t, ok)
+	})
+	t.Run("clusterpolicy absent", func(t *testing.T) {
+		// Before the operator is installed the CR doesn't exist: kubectl errors,
+		// GPUReady returns (false, nil) so the readiness poll keeps going.
+		addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+			return "", 1
+		})
+		defer cleanup()
+		p := newProvisioner(t, addr, cfg)
+		defer p.Close()
+		ok, err := p.GPUReady(context.Background())
+		require.NoError(t, err)
+		assert.False(t, ok)
+	})
+}
+
+func TestEnsureRepo_CommandShape(t *testing.T) {
+	var got string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v helm":
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "--force-update"):
+			got = cmd
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.EnsureRepo(context.Background(), "nvidia", "https://helm.ngc.nvidia.com/nvidia"))
+	assert.Contains(t, got, "repo")
+	assert.Contains(t, got, "add")
+	assert.Contains(t, got, "--force-update")
+	assert.Contains(t, got, "nvidia")
+	assert.Contains(t, got, "https://helm.ngc.nvidia.com/nvidia")
 }

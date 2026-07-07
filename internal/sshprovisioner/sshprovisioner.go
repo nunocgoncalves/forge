@@ -192,6 +192,16 @@ func (p *SSHProvisioner) Preflight(ctx context.Context) (*provisioner.PreflightR
 	if _, err := p.run(ctx, "ip -6 addr show scope global"); err == nil {
 		r.HasIPv6 = true
 	}
+	// GPU preflight checks (read-only; only meaningful when GPU is enabled).
+	// NVIDIA GPU on the PCI bus via the vendor ID (0x10de) — no driver or
+	// pciutils needed. Kernel-headers presence via the /usr/src dir the driver
+	// container mounts.
+	if _, err := p.run(ctx, "grep -qi 0x10de /sys/bus/pci/devices/*/vendor"); err == nil {
+		r.HasNVIDIAGPU = true
+	}
+	if _, err := p.run(ctx, "test -d /usr/src/linux-headers-$(uname -r)"); err == nil {
+		r.KernelHeadersInstalled = true
+	}
 	return r, nil
 }
 
@@ -247,6 +257,29 @@ func (p *SSHProvisioner) NodeReady(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return strings.Contains(out, "ok"), nil
+}
+
+// EnsureDriverBuildDeps implements provisioner.Provisioner. It installs the
+// kernel headers matching the running kernel so the GPU operator's driver
+// container can compile the NVIDIA module. Ubuntu/apt in v1; idempotent.
+func (p *SSHProvisioner) EnsureDriverBuildDeps(ctx context.Context) error {
+	cmd := "sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r)"
+	if _, err := p.run(ctx, cmd); err != nil {
+		return fmt.Errorf("install kernel headers: %w", err)
+	}
+	return nil
+}
+
+// GPUReady implements provisioner.Provisioner. It reads the GPU operator's
+// ClusterPolicy status over the host's k3s kubectl. A missing/not-ready CR
+// (including before the operator is installed) returns (false, nil) so the
+// readiness poll keeps going rather than aborting.
+func (p *SSHProvisioner) GPUReady(ctx context.Context) (bool, error) {
+	out, err := p.run(ctx, "sudo k3s kubectl get clusterpolicy -o jsonpath='{.items[0].status.state}'")
+	if err != nil {
+		return false, nil
+	}
+	return strings.TrimSpace(out) == "ready", nil
 }
 
 func parseOS(out string) string {
@@ -331,20 +364,24 @@ func (p *SSHProvisioner) ensureHelm(ctx context.Context) error {
 	return nil
 }
 
-// Apply implements deployer.Deployer: idempotent helm upgrade --install of the
-// platform chart, ensuring helm first.
-func (p *SSHProvisioner) Apply(ctx context.Context, release, repository, version, namespace string) error {
+// Apply implements deployer.Deployer: idempotent helm upgrade --install of a
+// Helm release, applying the given --set values (empty for the platform chart,
+// whose values come from the overlay), ensuring helm first.
+func (p *SSHProvisioner) Apply(ctx context.Context, release, repository, version, namespace string, values []string) error {
 	if err := p.ensureHelm(ctx); err != nil {
 		return err
 	}
-	cmd := helmCmd("upgrade", "--install", release, repository,
+	args := []string{"upgrade", "--install", release, repository,
 		"--version", version,
 		"-n", namespace,
 		"--create-namespace",
 		"--wait",
 		"--timeout", "10m",
-	)
-	if _, err := p.run(ctx, cmd); err != nil {
+	}
+	for _, v := range values {
+		args = append(args, "--set", v)
+	}
+	if _, err := p.run(ctx, helmCmd(args...)); err != nil {
 		return fmt.Errorf("helm install: %w", err)
 	}
 	return nil
@@ -370,6 +407,19 @@ func (p *SSHProvisioner) UninstallChart(ctx context.Context, release, namespace 
 		return nil // helm absent => nothing to remove
 	}
 	_, _ = p.run(ctx, helmCmd("uninstall", release, "-n", namespace)) // best-effort
+	return nil
+}
+
+// EnsureRepo implements deployer.Deployer: idempotent `helm repo add
+// --force-update`. Ensures helm first. Used for repo-based charts (the NVIDIA
+// GPU Operator); a no-op concern for OCI charts like the platform chart.
+func (p *SSHProvisioner) EnsureRepo(ctx context.Context, name, url string) error {
+	if err := p.ensureHelm(ctx); err != nil {
+		return err
+	}
+	if _, err := p.run(ctx, helmCmd("repo", "add", "--force-update", name, url)); err != nil {
+		return fmt.Errorf("helm repo add %s: %w", name, err)
+	}
 	return nil
 }
 

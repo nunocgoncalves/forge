@@ -194,7 +194,7 @@ func applyChart(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, o
 		return nil
 	}
 	ch := cfg.Spec.Chart
-	if err := d.Apply(ctx, ch.Release, ch.Repository, ch.Version, ch.Namespace); err != nil {
+	if err := d.Apply(ctx, ch.Release, ch.Repository, ch.Version, ch.Namespace, nil); err != nil {
 		auditFail(cfg, "apply", err)
 		return fmt.Errorf("chart: %w", err)
 	}
