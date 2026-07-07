@@ -45,31 +45,55 @@ func (a Action) String() string {
 
 // ReconcilePlan is the read-only reconcile decision (also returned by --dry-run).
 type ReconcilePlan struct {
-	Preflight     *provisioner.PreflightResult
-	Installed     bool
-	Action        Action
-	Reason        string
-	ImmutableDiff []string
-	HaveVersion   string
-	WantVersion   string
-	ChartVersion  string // platform chart version to apply (empty => skip)
+	Preflight          *provisioner.PreflightResult
+	Installed          bool
+	Action             Action
+	Reason             string
+	ImmutableDiff      []string
+	HaveVersion        string
+	WantVersion        string
+	ChartVersion       string // platform chart version to apply (empty => skip)
+	GPUEnabled         bool   // gpu.enabled; the GPU readiness phase will run
+	GPUOperatorVersion string // nvidia/gpu-operator chart version to install (empty => GPU disabled)
 }
 
 // Result is the outcome of a mutating apply.
 type Result struct {
-	Plan           *ReconcilePlan
-	KubeconfigPath string
-	NodeReady      bool
-	ChartApplied   bool
+	Plan               *ReconcilePlan
+	KubeconfigPath     string
+	NodeReady          bool
+	ChartApplied       bool
+	GPUOperatorApplied bool // nvidia/gpu-operator release installed/upgraded
+	GPUReady           bool // ClusterPolicy reached state=ready (the GPU readiness gate)
 }
 
 // ApplyOpts configures an apply run.
 type ApplyOpts struct {
-	KubeconfigOut string
-	DryRun        bool
-	ReadyTimeout  time.Duration // default 120s
-	ReadyInterval time.Duration // default 2s
-	SkipChart     bool          // skip the platform chart phase (k3s-only)
+	KubeconfigOut    string
+	DryRun           bool
+	ReadyTimeout     time.Duration // default 120s
+	ReadyInterval    time.Duration // default 2s
+	SkipChart        bool          // skip the platform chart phase (k3s-only)
+	SkipGPU          bool          // skip the GPU readiness phase
+	GPUReadyTimeout  time.Duration // default 15m (driver compile is slow on first boot)
+	GPUReadyInterval time.Duration // default 5s
+}
+
+// withDefaults fills zero-valued timeouts/intervals with their defaults.
+func (o ApplyOpts) withDefaults() ApplyOpts {
+	if o.ReadyTimeout == 0 {
+		o.ReadyTimeout = 120 * time.Second
+	}
+	if o.ReadyInterval == 0 {
+		o.ReadyInterval = 2 * time.Second
+	}
+	if o.GPUReadyTimeout == 0 {
+		o.GPUReadyTimeout = 15 * time.Minute
+	}
+	if o.GPUReadyInterval == 0 {
+		o.GPUReadyInterval = 5 * time.Second
+	}
+	return o
 }
 
 // Plan runs preflight + read-state and returns the reconcile decision. It does
@@ -85,6 +109,17 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 	}
 
 	plan := &ReconcilePlan{Preflight: pf, WantVersion: cfg.Spec.K3s.Version, ChartVersion: cfg.Spec.Chart.Version}
+
+	if cfg.Spec.GPU.Enabled {
+		if !pf.HasNVIDIAGPU {
+			return nil, fmt.Errorf("preflight: gpu.enabled is true but no NVIDIA GPU is present on the PCI bus (PCI passthrough is an OPO1/S11 concern, not forge)")
+		}
+		if !isUbuntu(pf.OS) {
+			return nil, fmt.Errorf("preflight: gpu.enabled requires an Ubuntu host in v1, got %q", pf.OS)
+		}
+		plan.GPUEnabled = true
+		plan.GPUOperatorVersion = cfg.Spec.GPU.Operator.Version
+	}
 
 	if !pf.Installed {
 		if !pf.HasCurl {
@@ -128,12 +163,7 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 // Apply runs Plan and, unless DryRun, executes the install/reconcile, fetches
 // and stores the kubeconfig, and waits for the node to be Ready.
 func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, opts ApplyOpts) (*Result, error) {
-	if opts.ReadyTimeout == 0 {
-		opts.ReadyTimeout = 120 * time.Second
-	}
-	if opts.ReadyInterval == 0 {
-		opts.ReadyInterval = 2 * time.Second
-	}
+	opts = opts.withDefaults()
 
 	plan, err := Plan(ctx, cfg, p)
 	if err != nil {
@@ -177,6 +207,10 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		return res, err
 	}
 
+	if err := applyGPU(ctx, cfg, p, d, opts, res); err != nil {
+		return res, err
+	}
+
 	if err := applyChart(ctx, cfg, d, opts, res); err != nil {
 		return res, err
 	}
@@ -202,12 +236,98 @@ func applyChart(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, o
 	return nil
 }
 
+// gpuOperatorRepoName is the local Helm repository name forge registers the
+// NVIDIA chart repo under. Not user-facing.
+const gpuOperatorRepoName = "nvidia"
+
+// applyGPU runs the GPU node-readiness phase: ensure the host can build the
+// driver, install/upgrade the NVIDIA GPU Operator release, then gate on the
+// operator's ClusterPolicy reaching ready. No-op when GPU is disabled or
+// skipped. Runs after the k3s node is Ready and before the platform chart
+// (substrate before app) so the first ModelBackend-driven GPU pod can schedule
+// immediately.
+func applyGPU(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, opts ApplyOpts, res *Result) error {
+	if !cfg.Spec.GPU.Enabled || opts.SkipGPU {
+		return nil
+	}
+	if err := p.EnsureDriverBuildDeps(ctx); err != nil {
+		auditFail(cfg, "apply-gpu", err)
+		return fmt.Errorf("gpu build deps: %w", err)
+	}
+	g := cfg.Spec.GPU.Operator
+	if err := d.EnsureRepo(ctx, gpuOperatorRepoName, g.Repository); err != nil {
+		auditFail(cfg, "apply-gpu", err)
+		return fmt.Errorf("gpu operator repo: %w", err)
+	}
+	chartRef := gpuOperatorRepoName + "/" + g.Chart
+	if err := d.Apply(ctx, g.Release, chartRef, g.Version, g.Namespace, gpuOperatorValues()); err != nil {
+		auditFail(cfg, "apply-gpu", err)
+		return fmt.Errorf("gpu operator: %w", err)
+	}
+	res.GPUOperatorApplied = true
+
+	ready, err := waitForGPU(ctx, p, opts)
+	if err != nil {
+		auditFail(cfg, "apply-gpu", err)
+		return err
+	}
+	res.GPUReady = ready
+	if !ready {
+		err = fmt.Errorf("gpu not ready after %s (ClusterPolicy did not reach state=ready)", opts.GPUReadyTimeout)
+		auditFail(cfg, "apply-gpu", err)
+		return err
+	}
+	return nil
+}
+
+// waitForGPU polls the GPU operator's ClusterPolicy readiness until it reports
+// ready or the timeout elapses. Mirrors waitForReady; errors from GPUReady are
+// tolerated (keep polling) since the CR may not exist yet.
+func waitForGPU(ctx context.Context, p provisioner.Provisioner, opts ApplyOpts) (bool, error) {
+	deadline := time.Now().Add(opts.GPUReadyTimeout)
+	for {
+		ready, err := p.GPUReady(ctx)
+		if err == nil && ready {
+			return true, nil
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(opts.GPUReadyInterval):
+		}
+	}
+}
+
+// gpuOperatorValues returns the forge-internal, prod-ready Helm --set values for
+// the NVIDIA GPU Operator. These mirror the chart's defaults and are set
+// explicitly so forge's intent is pinned against chart default changes; advanced
+// overrides are a fast-follow. CDI is enabled so workloads request
+// nvidia.com/gpu with no runtimeClassName.
+func gpuOperatorValues() []string {
+	return []string{
+		"cdi.enabled=true",
+		"driver.enabled=true",
+		"toolkit.enabled=true",
+		"devicePlugin.enabled=true",
+		"gfd.enabled=true",
+	}
+}
+
+func isUbuntu(os string) bool { return strings.HasPrefix(os, "Ubuntu") }
+
 // Destroy removes the platform chart (if configured) and then uninstalls k3s.
 // Chart removal is best-effort so destroy always proceeds to substrate removal.
 func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer) error {
 	if d != nil && cfg.Spec.Chart.Version != "" {
 		ch := cfg.Spec.Chart
 		_ = d.UninstallChart(ctx, ch.Release, ch.Namespace)
+	}
+	if d != nil && cfg.Spec.GPU.Enabled {
+		g := cfg.Spec.GPU.Operator
+		_ = d.UninstallChart(ctx, g.Release, g.Namespace)
 	}
 	return p.Uninstall(ctx)
 }

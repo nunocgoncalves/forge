@@ -346,3 +346,131 @@ func TestDestroy_NoChart(t *testing.T) {
 	assert.Empty(t, d.uninstallCalls) // no chart configured
 	assert.False(t, p.state.Installed)
 }
+
+func testConfigWithGPU() *config.Cluster {
+	c := testConfigWithChart()
+	c.Spec.GPU = config.GPU{Enabled: true}
+	c.Spec.GPU.Operator = config.GPUOperator{
+		Version:    "v26.3.3",
+		Repository: "https://helm.ngc.nvidia.com/nvidia",
+		Chart:      "gpu-operator",
+		Release:    "opo1-gpu-operator",
+		Namespace:  "gpu-operator",
+	}
+	return c
+}
+
+func gpuReadyPf() provisioner.PreflightResult {
+	pf := readyPf()
+	pf.OS = "Ubuntu 24.04 LTS"
+	pf.HasNVIDIAGPU = true
+	pf.KernelHeadersInstalled = true
+	return pf
+}
+
+func TestPlan_GPUEnabled(t *testing.T) {
+	p := &fakeProv{pf: gpuReadyPf()} // not installed
+	plan, err := Plan(context.Background(), testConfigWithGPU(), p)
+	require.NoError(t, err)
+	assert.True(t, plan.GPUEnabled)
+	assert.Equal(t, "v26.3.3", plan.GPUOperatorVersion)
+	assert.Equal(t, ActionInstall, plan.Action)
+}
+
+func TestPlan_GPUEnabledNoGPU(t *testing.T) {
+	pf := gpuReadyPf()
+	pf.HasNVIDIAGPU = false
+	p := &fakeProv{pf: pf}
+	_, err := Plan(context.Background(), testConfigWithGPU(), p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no NVIDIA GPU")
+}
+
+func TestPlan_GPUEnabledNonUbuntu(t *testing.T) {
+	pf := gpuReadyPf()
+	pf.OS = "Debian GNU/Linux 12 (bookworm)"
+	p := &fakeProv{pf: pf}
+	_, err := Plan(context.Background(), testConfigWithGPU(), p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Ubuntu")
+}
+
+func TestApply_GPU(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          true,
+	}
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), testConfigWithGPU(), p, d, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	// GPU operator applied before the platform chart (substrate before app).
+	require.Len(t, d.applyCalls, 2)
+	op, chart := d.applyCalls[0], d.applyCalls[1]
+	assert.Equal(t, "opo1-gpu-operator", op.release)
+	assert.Equal(t, "nvidia/gpu-operator", op.repository)
+	assert.Equal(t, "v26.3.3", op.version)
+	assert.Equal(t, "gpu-operator", op.namespace)
+	assert.Equal(t, []string{"cdi.enabled=true", "driver.enabled=true", "toolkit.enabled=true", "devicePlugin.enabled=true", "gfd.enabled=true"}, op.values)
+	assert.Equal(t, "opo1", chart.release)
+	assert.Equal(t, "0.1.0", chart.version)
+	assert.Equal(t, 1, p.ensureDepsCalls) // build deps ensured once
+	require.Len(t, d.repoCalls, 1)
+	assert.Equal(t, "nvidia", d.repoCalls[0].name)
+	assert.Equal(t, "https://helm.ngc.nvidia.com/nvidia", d.repoCalls[0].url)
+	assert.True(t, res.GPUOperatorApplied)
+	assert.True(t, res.GPUReady)
+	assert.True(t, res.ChartApplied)
+}
+
+func TestApply_SkipGPU(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          true,
+	}
+	d := &fakeDeployer{}
+	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, ApplyOpts{
+		SkipGPU: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, d.repoCalls)          // no GPU operator repo
+	assert.Equal(t, 0, p.ensureDepsCalls) // no build deps
+	require.Len(t, d.applyCalls, 1)       // platform chart only
+	assert.Equal(t, "opo1", d.applyCalls[0].release)
+}
+
+func TestApply_GPU_NotReady(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          false, // ClusterPolicy never reaches ready
+	}
+	d := &fakeDeployer{}
+	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		GPUReadyTimeout: 100 * time.Millisecond, GPUReadyInterval: 20 * time.Millisecond,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gpu not ready")
+}
+
+func TestDestroy_GPU(t *testing.T) {
+	p := &fakeProv{pf: gpuReadyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	require.NoError(t, Destroy(context.Background(), testConfigWithGPU(), p, d))
+	require.Len(t, d.uninstallCalls, 2)                               // chart + gpu operator
+	assert.Equal(t, "opo1", d.uninstallCalls[0].release)              // chart first
+	assert.Equal(t, "opo1-gpu-operator", d.uninstallCalls[1].release) // then operator
+	assert.False(t, p.state.Installed)                                // then k3s
+}
