@@ -55,6 +55,9 @@ type fakeProv struct {
 	kubeconfig        []byte
 	installErr        error
 	installs          []installCall
+	ensureDepsErr     error
+	ensureDepsCalls   int
+	gpuReady          bool
 }
 
 func (f *fakeProv) Preflight(_ context.Context) (*provisioner.PreflightResult, error) {
@@ -84,6 +87,11 @@ func (f *fakeProv) ReadState(_ context.Context) (*provisioner.HostState, error) 
 	return &s, nil
 }
 func (f *fakeProv) NodeReady(_ context.Context) (bool, error) { return f.ready, nil }
+func (f *fakeProv) EnsureDriverBuildDeps(_ context.Context) error {
+	f.ensureDepsCalls++
+	return f.ensureDepsErr
+}
+func (f *fakeProv) GPUReady(_ context.Context) (bool, error) { return f.gpuReady, nil }
 
 func readyPf() provisioner.PreflightResult {
 	return provisioner.PreflightResult{HasSudo: true, HasCurl: true, HasSystemd: true, HasIPv6: true}
@@ -250,20 +258,29 @@ func TestUpgrade_NotInstalled(t *testing.T) {
 	assert.Contains(t, err.Error(), "not installed")
 }
 
-type applyCall struct{ release, repository, version, namespace string }
+type applyCall struct {
+	release, repository, version, namespace string
+	values                                  []string
+}
+type repoCall struct{ name, url string }
 type uninstallCall struct{ release, namespace string }
 
 // fakeDeployer is a controllable deployer.Deployer for lifecycle chart tests.
 type fakeDeployer struct {
 	applyCalls     []applyCall
+	repoCalls      []repoCall
 	uninstallCalls []uninstallCall
 	statusState    deployer.ChartState
 	applyErr       error
 }
 
-func (f *fakeDeployer) Apply(_ context.Context, release, repo, version, ns string) error {
-	f.applyCalls = append(f.applyCalls, applyCall{release, repo, version, ns})
+func (f *fakeDeployer) Apply(_ context.Context, release, repo, version, ns string, values []string) error {
+	f.applyCalls = append(f.applyCalls, applyCall{release, repo, version, ns, values})
 	return f.applyErr
+}
+func (f *fakeDeployer) EnsureRepo(_ context.Context, name, url string) error {
+	f.repoCalls = append(f.repoCalls, repoCall{name, url})
+	return nil
 }
 func (f *fakeDeployer) Status(_ context.Context, _, _ string) (*deployer.ChartState, error) {
 	s := f.statusState

@@ -20,12 +20,14 @@ type HostState struct {
 
 // PreflightResult is the read-only host readiness check outcome.
 type PreflightResult struct {
-	OS         string // e.g. "Ubuntu 24.04 LTS"
-	HasSudo    bool   // passwordless sudo works
-	HasCurl    bool   // curl present (install script dependency)
-	HasSystemd bool   // systemd present (k3s is a systemd unit)
-	Installed  bool   // k3s already installed
-	HasIPv6    bool   // host has IPv6 (relevant when dualStack)
+	OS                     string // e.g. "Ubuntu 24.04 LTS"
+	HasSudo                bool   // passwordless sudo works
+	HasCurl                bool   // curl present (install script dependency)
+	HasSystemd             bool   // systemd present (k3s is a systemd unit)
+	Installed              bool   // k3s already installed
+	HasIPv6                bool   // host has IPv6 (relevant when dualStack)
+	HasNVIDIAGPU           bool   // an NVIDIA GPU is on the PCI bus (GPU preflight; S11 passthrough precondition)
+	KernelHeadersInstalled bool   // linux-headers-$(uname -r) present (GPU driver build dep)
 }
 
 // Provisioner abstracts host-level k3s operations. One instance is bound to a
@@ -45,4 +47,12 @@ type Provisioner interface {
 	ReadState(ctx context.Context) (*HostState, error)
 	// NodeReady reports whether the cluster node is Ready (via remote k3s kubectl).
 	NodeReady(ctx context.Context) (bool, error)
+	// EnsureDriverBuildDeps ensures the host can compile the NVIDIA kernel module
+	// via the GPU operator's driver container (installs matching linux-headers on
+	// Ubuntu). Idempotent. Only called when GPU is enabled.
+	EnsureDriverBuildDeps(ctx context.Context) error
+	// GPUReady reports whether the GPU operator's ClusterPolicy has reached
+	// state=ready (driver + toolkit + device plugin + runtime + CUDA validated
+	// end-to-end by the operator). Polled as the GPU readiness gate.
+	GPUReady(ctx context.Context) (bool, error)
 }
