@@ -40,6 +40,6 @@ make install-hooks  # wire .githooks/ via core.hooksPath
 ### v1 boundaries (deferred to later tickets)
 
 - Helm umbrella chart + Postgres/Redis/MinIO/services/ingress + Flux + overlay repo = HOR-239.
-- GPU driver/toolkit/RuntimeClass + vLLM = HOR-240.
+- GPU driver/toolkit/RuntimeClass (node readiness) = HOR-240; vLLM/SGLang workload deployment = HOR-306 (control-plane, CRD-driven from the overlay).
 - Node labels/taints are applied at install via k3s flags (verbatim from config); label-drift reconciliation via the API is a fast-follow.
 - Homebrew tap is deferred (goreleaser deprecated `brews`).
