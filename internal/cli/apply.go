@@ -22,6 +22,7 @@ destroy' then 'forge apply'); version changes are routed to 'forge upgrade'.`,
 	}
 	cmd.Flags().Bool("dry-run", false, "preflight and print the plan without mutating")
 	cmd.Flags().Bool("skip-chart", false, "skip the platform chart phase (k3s only)")
+	cmd.Flags().Bool("skip-gpu", false, "skip the GPU readiness phase")
 	cmd.Flags().String("kubeconfig-out", "", "path to write the fetched kubeconfig (default ~/.forge/<install>/kubeconfig.yaml)")
 	return cmd
 }
@@ -53,8 +54,9 @@ func runApply(cmd *cobra.Command, _ []string) error {
 
 	kcOut, _ := cmd.Flags().GetString("kubeconfig-out")
 	skipChart, _ := cmd.Flags().GetBool("skip-chart")
+	skipGPU, _ := cmd.Flags().GetBool("skip-gpu")
 	log.Info("applying", "install", cfg.Metadata.Name)
-	res, err := lifecycle.Apply(ctx, cfg, p, p, lifecycle.ApplyOpts{KubeconfigOut: kcOut, SkipChart: skipChart})
+	res, err := lifecycle.Apply(ctx, cfg, p, p, lifecycle.ApplyOpts{KubeconfigOut: kcOut, SkipChart: skipChart, SkipGPU: skipGPU})
 	if err != nil {
 		return err
 	}
@@ -66,6 +68,10 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if cfg.Spec.Chart.Version != "" {
 		fmt.Fprintf(out, "  chart:      %s\n", cfg.Spec.Chart.Version)
 		fmt.Fprintf(out, "  chart applied: %v\n", res.ChartApplied)
+	}
+	if cfg.Spec.GPU.Enabled {
+		fmt.Fprintf(out, "  gpu operator: %v\n", res.GPUOperatorApplied)
+		fmt.Fprintf(out, "  gpu ready:    %v\n", res.GPUReady)
 	}
 	return nil
 }
@@ -87,5 +93,9 @@ func printPlan(cmd *cobra.Command, plan *lifecycle.ReconcilePlan) {
 	fmt.Fprintf(out, "  want:      %s\n", plan.WantVersion)
 	if plan.ChartVersion != "" {
 		fmt.Fprintf(out, "  chart:     %s\n", plan.ChartVersion)
+	}
+	if plan.GPUEnabled {
+		fmt.Fprintf(out, "  gpu:       %s (enabled)\n", plan.GPUOperatorVersion)
+		fmt.Fprintf(out, "  gpu pci:   %v\n", plan.Preflight.HasNVIDIAGPU)
 	}
 }

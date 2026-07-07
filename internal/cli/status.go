@@ -57,5 +57,26 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(out, "chart:      not installed (want %s)\n", cfg.Spec.Chart.Version)
 		}
 	}
+	if cfg.Spec.GPU.Enabled {
+		g := cfg.Spec.GPU.Operator
+		fmt.Fprintln(out, "gpu:")
+		fmt.Fprintf(out, "  enabled:       true\n")
+		fmt.Fprintf(out, "  pci present:   %v\n", plan.Preflight.HasNVIDIAGPU)
+		fmt.Fprintf(out, "  headers:       %s\n", boolLabel(plan.Preflight.KernelHeadersInstalled, "installed", "absent"))
+		if cs, _ := p.Status(ctx, g.Release, g.Namespace); cs != nil && cs.Installed {
+			fmt.Fprintf(out, "  operator:      %s (%s)\n", g.Version, cs.Status)
+		} else {
+			fmt.Fprintf(out, "  operator:      not installed (want %s)\n", g.Version)
+		}
+		ready, _ := p.GPUReady(ctx)
+		fmt.Fprintf(out, "  clusterpolicy: %s\n", boolLabel(ready, "ready", "notReady"))
+	}
 	return nil
+}
+
+func boolLabel(b bool, on, off string) string {
+	if b {
+		return on
+	}
+	return off
 }
