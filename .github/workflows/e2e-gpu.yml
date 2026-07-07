@@ -1,0 +1,42 @@
+name: e2e-gpu
+
+on:
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "go.mod"
+      - "go.sum"
+      - "test/e2e/**"
+      - ".github/workflows/e2e-gpu.yml"
+  schedule:
+    # Nightly 03:00 UTC — catches regressions that slip when GPU capacity is
+    # scarce and the PR-time run skips.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+# Serialize GPU e2e (one GPU droplet at a time); never cancel a running run so
+# its droplet is always torn down by the test rather than orphaned. The test
+# skips loudly (exit 0) when no GPU capacity is available, so a skipped run never
+# blocks a PR — only a real regression (non-skip failure) does.
+concurrency:
+  group: e2e-gpu
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+
+      - name: gpu e2e
+        run: make test-e2e-gpu
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
