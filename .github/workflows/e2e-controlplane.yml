@@ -25,15 +25,16 @@ jobs:
         with:
           go-version: "1.26.x"
 
-      # Toolchain for the Kind-based chart-wiring harness.
+      # Toolchain for the Kind-based chart-wiring harness. /usr/local/bin needs
+      # sudo on the runner, so download to /tmp and `sudo install`.
       - name: install kind + helm + kubectl
         run: |
-          curl -sSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
-          chmod +x /usr/local/bin/kind
+          curl -sSL -o /tmp/kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
           curl -sSL https://get.helm.sh/helm-v3.18.0-linux-amd64.tar.gz | tar -xz -C /tmp
-          install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
-          curl -sSL -o /usr/local/bin/kubectl https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl
-          chmod +x /usr/local/bin/kubectl
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          curl -sSL -o /tmp/kubectl "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
 
       # The control-plane chart (HOR-316) is published at
       # oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane. The test
