@@ -23,7 +23,7 @@ func validCluster() *Cluster {
 				SSHUser:    "forge",
 				SSHKeyPath: "~/.ssh/forge_ed25519",
 				Role:       RoleControlPlaneWorker,
-				Labels:     map[string]string{"node-role.horizonshift.io/gpu": "true"},
+				Labels:     map[string]string{"forge.horizonshift.io/env": "test"},
 				Taints:     []Taint{{Key: "nvidia.com/gpu", Value: "true", Effect: "NoSchedule"}},
 			}},
 			K3s: K3s{
@@ -60,7 +60,7 @@ func TestParse_Valid(t *testing.T) {
 	h := c.Spec.Hosts[0]
 	assert.Equal(t, "10.20.0.10", h.Address)
 	assert.Equal(t, "forge", h.SSHUser)
-	assert.Equal(t, "true", h.Labels["node-role.horizonshift.io/gpu"])
+	assert.Equal(t, "test", h.Labels["forge.horizonshift.io/env"])
 	require.Len(t, h.Taints, 1)
 	assert.Equal(t, "NoSchedule", h.Taints[0].Effect)
 	assert.True(t, c.Spec.K3s.DualStack)
@@ -180,4 +180,30 @@ func TestParse_ChartEmptySkipsDefaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, c.Spec.Chart.Version)
 	assert.Empty(t, c.Spec.Chart.Repository)
+}
+
+func TestParse_GPUDefaults(t *testing.T) {
+	c, err := Parse(yamlFor(t, func(cc *Cluster) {
+		cc.Spec.GPU = GPU{Enabled: true}
+	}))
+	require.NoError(t, err)
+	assert.True(t, c.Spec.GPU.Enabled)
+	assert.Equal(t, defaultGPUOperatorVersion, c.Spec.GPU.Operator.Version)
+	assert.Equal(t, defaultGPUOperatorRepository, c.Spec.GPU.Operator.Repository)
+	assert.Equal(t, defaultGPUOperatorChart, c.Spec.GPU.Operator.Chart)
+	assert.Equal(t, "opo1-gpu-operator", c.Spec.GPU.Operator.Release)
+	assert.Equal(t, defaultGPUOperatorNamespace, c.Spec.GPU.Operator.Namespace)
+}
+
+func TestParse_GPUDisabledNoDefaults(t *testing.T) {
+	c, err := Parse(yamlFor(t, nil))
+	require.NoError(t, err)
+	assert.False(t, c.Spec.GPU.Enabled)
+	assert.Empty(t, c.Spec.GPU.Operator.Version)
+}
+
+func TestGPUValidate_RequiresSingleNode(t *testing.T) {
+	err := GPU{Enabled: true}.validate(ModeHA)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "single-node")
 }
