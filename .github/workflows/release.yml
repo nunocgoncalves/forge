@@ -20,6 +20,9 @@ jobs:
         with:
           go-version: "1.26.x"
 
+      - name: install syft (for goreleaser SBOM)
+        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sudo sh -s -- -b /usr/local/bin
+
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: v2
