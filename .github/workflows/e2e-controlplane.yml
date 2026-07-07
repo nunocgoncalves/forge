@@ -1,0 +1,45 @@
+name: e2e-controlplane
+
+on:
+  pull_request:
+    paths:
+      - "test/e2e/**"
+      - ".github/workflows/e2e-controlplane.yml"
+  workflow_dispatch:
+
+# Independent from the DigitalOcean e2e (no token, no global serialization).
+concurrency:
+  group: e2e-controlplane-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  controlplane-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+
+      # Toolchain for the Kind-based chart-wiring harness.
+      - name: install kind + helm + kubectl
+        run: |
+          curl -sSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x /usr/local/bin/kind
+          curl -sSL https://get.helm.sh/helm-v3.18.0-linux-amd64.tar.gz | tar -xz -C /tmp
+          install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          curl -sSL -o /usr/local/bin/kubectl https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl
+          chmod +x /usr/local/bin/kubectl
+
+      # Gated off until the control-plane chart ships (HOR-316). The test skips
+      # fast without CONTROL_PLANE_E2E set; this still validates that the
+      # harness compiles and the toolchain installs in CI. Set the env below to
+      # "1" once HOR-316 is merged + the chart is published.
+      - name: control-plane identity e2e
+        run: make test-e2e-controlplane
+        env:
+          CONTROL_PLANE_E2E: "" # TODO(HOR-316): set to "1" once the chart ships
