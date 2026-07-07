@@ -47,6 +47,7 @@ type Spec struct {
 	Flux    Flux    `yaml:"flux"`
 	Overlay Overlay `yaml:"overlay"`
 	Chart   Chart   `yaml:"chart"`
+	GPU     GPU     `yaml:"gpu"`
 }
 
 // Host describes a single target VM/host.
@@ -121,6 +122,71 @@ func (c *Chart) applyDefaults(install string) {
 	}
 }
 
+// GPU is the opt-in NVIDIA GPU node-readiness configuration. When Enabled,
+// forge installs the NVIDIA GPU Operator (containerized driver + container
+// toolkit + device plugin + RuntimeClass via CDI) as a forge-managed Helm
+// release and gates apply on the operator's ClusterPolicy reaching ready. It is
+// a forge composable dependency, not a chart value — the overlay owns those.
+// v1: single-node, Ubuntu hosts only.
+type GPU struct {
+	Enabled  bool        `yaml:"enabled"`
+	Operator GPUOperator `yaml:"operator"`
+}
+
+// GPUOperator is the NVIDIA GPU Operator Helm release pointer. Defaults are
+// applied in Validate when GPU is enabled; an empty Version falls back to the
+// forge-pinned default.
+type GPUOperator struct {
+	Version    string `yaml:"version"`    // chart version (semver); default defaultGPUOperatorVersion
+	Repository string `yaml:"repository"` // helm repo URL; default the NGC chart repo
+	Chart      string `yaml:"chart"`      // chart name in the repo; default gpu-operator
+	Release    string `yaml:"release"`    // helm release name (default: <metadata.name>-gpu-operator)
+	Namespace  string `yaml:"namespace"`  // target namespace (default: gpu-operator)
+}
+
+const (
+	defaultGPUOperatorVersion    = "v26.3.3"
+	defaultGPUOperatorRepository = "https://helm.ngc.nvidia.com/nvidia"
+	defaultGPUOperatorChart      = "gpu-operator"
+	defaultGPUOperatorNamespace  = "gpu-operator"
+)
+
+// applyDefaults fills the GPU operator release pointer defaults when GPU is
+// enabled. When disabled, the GPU phase is skipped and defaults stay empty.
+func (g *GPU) applyDefaults(install string) {
+	if !g.Enabled {
+		return
+	}
+	if g.Operator.Version == "" {
+		g.Operator.Version = defaultGPUOperatorVersion
+	}
+	if g.Operator.Repository == "" {
+		g.Operator.Repository = defaultGPUOperatorRepository
+	}
+	if g.Operator.Chart == "" {
+		g.Operator.Chart = defaultGPUOperatorChart
+	}
+	if g.Operator.Release == "" {
+		g.Operator.Release = install + "-gpu-operator"
+	}
+	if g.Operator.Namespace == "" {
+		g.Operator.Namespace = defaultGPUOperatorNamespace
+	}
+}
+
+// validate enforces v1 constraints on the GPU configuration. GPU readiness
+// supports single-node only in v1 (HA is already refused by mode validation;
+// this guard makes the intent explicit and keeps GPU enablement honest).
+func (g GPU) validate(mode string) error {
+	if !g.Enabled {
+		return nil
+	}
+	if mode != ModeSingleNode {
+		return fmt.Errorf("gpu.enabled requires mode %q in v1, got %q", ModeSingleNode, mode)
+	}
+	return nil
+}
+
 // Load reads and parses a forge.yaml config from path.
 func Load(path string) (*Cluster, error) {
 	data, err := os.ReadFile(path)
@@ -157,6 +223,7 @@ func (c *Cluster) Validate() error {
 		return fmt.Errorf("metadata.name %q must be lowercase alphanumeric with hyphens", c.Metadata.Name)
 	}
 	c.Spec.Chart.applyDefaults(c.Metadata.Name)
+	c.Spec.GPU.applyDefaults(c.Metadata.Name)
 	return c.Spec.validate()
 }
 
@@ -175,6 +242,9 @@ func (s *Spec) validate() error {
 		if err := h.validate(); err != nil {
 			return fmt.Errorf("host[%d]: %w", i, err)
 		}
+	}
+	if err := s.GPU.validate(s.Mode); err != nil {
+		return err
 	}
 	return s.K3s.validate()
 }

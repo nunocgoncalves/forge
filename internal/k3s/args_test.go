@@ -20,8 +20,8 @@ func cfg() *config.Cluster {
 				Address: "10.20.0.10", SSHUser: "forge", SSHKeyPath: "~/.ssh/k",
 				Role: config.RoleControlPlaneWorker,
 				Labels: map[string]string{
-					"node-role.horizonshift.io/gpu": "true",
-					"z-last":                        "1",
+					"forge.horizonshift.io/env": "test",
+					"z-last":                    "1",
 				},
 				Taints: []config.Taint{
 					{Key: "nvidia.com/gpu", Value: "true", Effect: "NoSchedule"},
@@ -72,12 +72,12 @@ func TestServerArgs_LabelsDeterministic(t *testing.T) {
 	a2 := ServerArgs(cfg())
 	require.Equal(t, a1, a2) // deterministic order
 	assert.Contains(t, a1, "--node-label")
-	assert.Contains(t, a1, "node-role.horizonshift.io/gpu=true")
+	assert.Contains(t, a1, "forge.horizonshift.io/env=test")
 	assert.Contains(t, a1, "z-last=1")
-	// sorted: node-role... must come before z-last
-	iGPU := indexOf(a1, "node-role.horizonshift.io/gpu=true")
+	// sorted: forge... must come before z-last
+	iForge := indexOf(a1, "forge.horizonshift.io/env=test")
 	iZ := indexOf(a1, "z-last=1")
-	require.Greater(t, iZ, iGPU)
+	require.Greater(t, iZ, iForge)
 }
 
 func TestServerArgs_Taints(t *testing.T) {

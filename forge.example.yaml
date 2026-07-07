@@ -11,8 +11,7 @@ spec:
       sshUser: forge           # any sudoer user; preflight validates passwordless sudo
       sshKeyPath: ~/.ssh/forge_ed25519
       role: control-plane+worker
-      labels:                  # applied verbatim; GPU-aware logic is HOR-240
-        node-role.horizonshift.io/gpu: "true"
+      labels: {}               # verbatim at install; GPU labels come from the operator's gpu-feature-discovery (HOR-240)
       taints: []
   k3s:
     version: v1.31.5+k3s1       # full k3s release tag (vX.Y.Z+k3sN); overridable
@@ -33,3 +32,11 @@ spec:
     # repository: oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform  # default
     # release: opo1            # default: metadata.name
     # namespace: iterabase-system  # default
+  gpu:                         # opt-in NVIDIA GPU node readiness (HOR-240); absent/false => skip
+    enabled: true              # OPO1 has the RTX Pro 6000 (PCI passthrough is an OPO1/S11 concern, not forge)
+    operator:
+      version: "v26.3.3"       # nvidia/gpu-operator chart version (NGC repo); default if omitted
+      # repository: https://helm.ngc.nvidia.com/nvidia  # default
+      # chart: gpu-operator                             # default
+      # release: opo1-gpu-operator                      # default: <metadata.name>-gpu-operator
+      # namespace: gpu-operator                         # default
