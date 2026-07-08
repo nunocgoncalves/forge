@@ -259,15 +259,41 @@ func (p *SSHProvisioner) NodeReady(ctx context.Context) (bool, error) {
 	return strings.Contains(out, "ok"), nil
 }
 
+// aptLockRetryInterval is the delay between apt retries when the apt/dpkg lock
+// is held. A fresh Ubuntu VM commonly has apt locked on first boot by
+// cloud-init or unattended-upgrades. Overridden in tests to avoid sleeping.
+var aptLockRetryInterval = 15 * time.Second
+
 // EnsureDriverBuildDeps implements provisioner.Provisioner. It installs the
 // kernel headers matching the running kernel so the GPU operator's driver
-// container can compile the NVIDIA module. Ubuntu/apt in v1; idempotent.
+// container can compile the NVIDIA module. Ubuntu/apt in v1; idempotent. It
+// retries on apt/dpkg lock contention (cloud-init/unattended-upgrades holding
+// the lock on first boot) rather than failing fast.
 func (p *SSHProvisioner) EnsureDriverBuildDeps(ctx context.Context) error {
 	cmd := "sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r)"
-	if _, err := p.run(ctx, cmd); err != nil {
-		return fmt.Errorf("install kernel headers: %w", err)
+	for attempt := 0; ; attempt++ {
+		out, err := p.run(ctx, cmd)
+		if err == nil {
+			return nil
+		}
+		lockHeld := isAptLockHeld(err.Error()) || isAptLockHeld(out)
+		if !lockHeld || attempt >= 20 {
+			return fmt.Errorf("install kernel headers: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(aptLockRetryInterval):
+		}
 	}
-	return nil
+}
+
+// isAptLockHeld reports whether an apt/dpkg error is lock contention
+// (retryable) rather than a real failure.
+func isAptLockHeld(msg string) bool {
+	return strings.Contains(msg, "Could not get lock") ||
+		strings.Contains(msg, "Unable to lock") ||
+		strings.Contains(msg, "is held by process")
 }
 
 // GPUReady implements provisioner.Provisioner. It reads the GPU operator's
