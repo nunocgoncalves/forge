@@ -210,10 +210,12 @@ func checkGPUSmoke(t *testing.T, kcPath string) {
 	require.NoError(t, err)
 
 	const name = "gpu-smoke"
+	nvidiaRC := "nvidia"
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
+			RuntimeClassName: &nvidiaRC,
+			RestartPolicy:    corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
 				Name:    "smoke",
 				Image:   "nvidia/cuda:12.4.1-base-ubuntu22.04",
