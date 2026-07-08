@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -555,4 +556,54 @@ func TestEnsureRepo_CommandShape(t *testing.T) {
 	assert.Contains(t, got, "--force-update")
 	assert.Contains(t, got, "nvidia")
 	assert.Contains(t, got, "https://helm.ngc.nvidia.com/nvidia")
+}
+
+func TestEnsureDriverBuildDeps_RetriesOnAptLock(t *testing.T) {
+	prev := aptLockRetryInterval
+	aptLockRetryInterval = time.Millisecond
+	defer func() { aptLockRetryInterval = prev }()
+
+	calls := 0
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		if !strings.Contains(cmd, "apt-get install -y linux-headers-$(uname -r)") {
+			return "", 1
+		}
+		calls++
+		if calls < 3 {
+			// apt lock held by cloud-init/unattended-upgrades on first boot
+			return "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1238 (apt-get)\n", 100
+		}
+		return "", 0
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.EnsureDriverBuildDeps(context.Background()))
+	assert.Equal(t, 3, calls)
+}
+
+func TestEnsureDriverBuildDeps_AptLockHeldTooLong(t *testing.T) {
+	prev := aptLockRetryInterval
+	aptLockRetryInterval = time.Millisecond
+	defer func() { aptLockRetryInterval = prev }()
+
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		if strings.Contains(cmd, "apt-get install -y linux-headers-$(uname -r)") {
+			return "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1238 (apt-get)\n", 100
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	err := p.EnsureDriverBuildDeps(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "install kernel headers")
+}
+
+func TestIsAptLockHeld(t *testing.T) {
+	assert.True(t, isAptLockHeld("ssh run ...; stderr: E: Could not get lock /var/lib/apt/lists/lock"))
+	assert.True(t, isAptLockHeld("E: Unable to lock directory /var/lib/apt/lists/"))
+	assert.True(t, isAptLockHeld("...is held by process 1238 (apt-get)"))
+	assert.False(t, isAptLockHeld("E: Unable to locate package linux-headers-6.8.0"))
 }
