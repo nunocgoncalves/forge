@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-controlplane test-e2e-gpu lint fmt fmt-check install-hooks clean
+.PHONY: build test test-unit test-e2e test-e2e-controlplane test-e2e-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
 
 # Load .env if present (e.g. DIGITALOCEAN_TOKEN for e2e). .env is gitignored.
 -include .env
@@ -31,6 +31,13 @@ test-e2e-controlplane:
 
 test-e2e-gpu:
 	cd test/e2e && go test -race -count=1 -timeout 45m -run TestGPUE2E .
+
+# Pure unit tests for the e2e harness internals (kindtest): fast, no network,
+# no cluster. Covers the chart auto-resolution helpers (HOR-321). The e2e
+# module is a separate Go module, so this is scoped to ./internal/...
+# (the real e2e tests need Kind/DO and run via test-e2e-*).
+test-e2e-unit:
+	cd test/e2e && go test -race -count=1 ./internal/...
 
 lint:
 	golangci-lint run ./...

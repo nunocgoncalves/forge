@@ -5,6 +5,13 @@ on:
     paths:
       - "test/e2e/**"
       - ".github/workflows/e2e-controlplane.yml"
+  schedule:
+    # Nightly 04:00 UTC — exercises the latest control-plane chart release so
+    # regressions surface within a day. The PR-time run only triggers on
+    # test/e2e/** changes, so without this a new chart release could go
+    # unverified until forge itself changes. Staggered off the GPU nightly
+    # (03:00 UTC) so the two independent e2e bursts don't coincide.
+    - cron: "0 4 * * *"
   workflow_dispatch:
 
 # Independent from the DigitalOcean e2e (no token, no global serialization).
@@ -38,6 +45,14 @@ jobs:
 
       # The control-plane chart (HOR-316) is published at
       # oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane. The test
-      # installs it into a Kind cluster and exercises the identity flow.
+      # auto-resolves the latest stable chart version + derives the image tag
+      # from the chart's appVersion (HOR-321), then installs it into a Kind
+      # cluster and exercises the identity flow.
       - name: control-plane identity e2e
         run: make test-e2e-controlplane
+        env:
+          # Authenticates the GitHub releases API call that auto-resolves the
+          # chart version (raises the rate limit from 60 to 5000 req/hour).
+          # Reads of the public charts repo work unauthenticated, but this
+          # avoids CI rate-limit flakes.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
