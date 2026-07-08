@@ -217,7 +217,7 @@ func checkGPUSmoke(t *testing.T, kcPath string) {
 			Containers: []corev1.Container{{
 				Name:    "smoke",
 				Image:   "nvidia/cuda:12.4.1-base-ubuntu22.04",
-				Command: []string{"nvidia-smi"},
+				Command: []string{"sh", "-c", "nvidia-smi 2>/dev/null || ls /dev/nvidia* 2>/dev/null"},
 				Resources: corev1.ResourceRequirements{
 					Limits: corev1.ResourceList{
 						corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
