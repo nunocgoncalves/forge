@@ -306,6 +306,14 @@ func waitForGPU(ctx context.Context, p provisioner.Provisioner, opts ApplyOpts) 
 // explicitly so forge's intent is pinned against chart default changes; advanced
 // overrides are a fast-follow. CDI is enabled so workloads request
 // nvidia.com/gpu with no runtimeClassName.
+//
+// k3s containerd: the operator does not auto-detect k3s, so the toolkit must be
+// pointed at k3s's containerd config + socket via toolkit.env (the operator
+// derives the host mounts from these and rewrites them to its in-container
+// paths). Without this the toolkit configures /etc/containerd and signals
+// /run/containerd/containerd.sock — neither of which k3s uses — and crashes.
+// forge is k3s-only in v1; revisit for HA/BYOK. CDI keeps nvidia non-default
+// (pods request nvidia.com/gpu; non-GPU pods stay on runc).
 func gpuOperatorValues() []string {
 	return []string{
 		"cdi.enabled=true",
@@ -313,6 +321,14 @@ func gpuOperatorValues() []string {
 		"toolkit.enabled=true",
 		"devicePlugin.enabled=true",
 		"gfd.enabled=true",
+		"toolkit.env[0].name=CONTAINERD_CONFIG",
+		"toolkit.env[0].value=/var/lib/rancher/k3s/agent/etc/containerd/config.toml",
+		"toolkit.env[1].name=CONTAINERD_SOCKET",
+		"toolkit.env[1].value=/run/k3s/containerd/containerd.sock",
+		"toolkit.env[2].name=CONTAINERD_RUNTIME_CLASS",
+		"toolkit.env[2].value=nvidia",
+		"toolkit.env[3].name=CONTAINERD_SET_AS_DEFAULT",
+		"toolkit.env[3].value=true",
 	}
 }
 
