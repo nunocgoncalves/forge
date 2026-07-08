@@ -33,16 +33,36 @@ import (
 //
 // The control-plane chart (HOR-316) is published at
 // oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane with its pgvector
-// Postgres dependency baked in. Override the version/image via env for local dev
-// (CONTROL_PLANE_LOCAL_CHART points at a checkout; CONTROL_PLANE_LOCAL_IMAGE
-// loads a locally-built image into the Kind nodes).
+// Postgres dependency baked in. By default the chart version is auto-resolved
+// from the charts repo's latest stable GitHub release and the image tag is
+// derived from the chart's appVersion, so CI is never silently pinned to an old
+// control-plane and the image can't drift from the chart (HOR-321). Override via
+// env for local dev / pinning: CONTROL_PLANE_LOCAL_CHART points at a checkout
+// (helm installs the path directly), CONTROL_PLANE_LOCAL_IMAGE loads a
+// locally-built image into the Kind nodes, and CONTROL_PLANE_CHART_VERSION /
+// CONTROL_PLANE_IMAGE_TAG pin a specific release/tag.
 func TestControlPlaneIdentity(t *testing.T) {
 	// --- chart config (env-overridable) ---
 	chartRef := envOr("CONTROL_PLANE_CHART", "oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane")
-	chartVersion := envOr("CONTROL_PLANE_CHART_VERSION", "0.2.1")
 	localChart := os.Getenv("CONTROL_PLANE_LOCAL_CHART") // optional local path for dev
 	imageRepo := envOr("CONTROL_PLANE_IMAGE_REPO", "ghcr.io/nunocgoncalves/control-plane")
-	imageTag := envOr("CONTROL_PLANE_IMAGE_TAG", "0.0.2")
+
+	// chartVersion: explicit pin wins; otherwise auto-resolve the latest stable
+	// release from the charts repo's GitHub releases (HOR-321). Skipped for
+	// local-chart dev — helm installs the path directly, so no version is needed.
+	chartVersion := os.Getenv("CONTROL_PLANE_CHART_VERSION")
+	if chartVersion == "" && localChart == "" {
+		chartVersion = kindtest.LatestChartVersion(t, "control-plane")
+	}
+
+	// imageTag: explicit pin wins; otherwise derive it from the chart's
+	// appVersion so the deployed image can never drift from the chart (the
+	// control-plane chart keeps appVersion == service version == image tag, per
+	// HOR-317). Reads the local Chart.yaml when CONTROL_PLANE_LOCAL_CHART is set.
+	imageTag := os.Getenv("CONTROL_PLANE_IMAGE_TAG")
+	if imageTag == "" {
+		imageTag = kindtest.ChartAppVersion(t, chartRef, chartVersion, localChart)
+	}
 
 	namespace := "control-plane-system"
 	release := "cp"
