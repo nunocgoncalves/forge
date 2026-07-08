@@ -316,10 +316,11 @@ func dumpGPUDiagnostics(t *testing.T, ip, keyPath string) {
 	t.Log("=== GPU diagnostics ===")
 	cmds := []string{
 		"sudo k3s kubectl get clusterpolicy -o jsonpath='{range .items[*]}{.metadata.name}: state={.status.state}{\"\\n\"}{end}'",
-		"sudo k3s kubectl get clusterpolicy -o yaml | sed -n '/^status:/,$p'",
 		"sudo k3s kubectl get pods -n gpu-operator -o wide",
-		"sudo k3s kubectl get pods -A -o wide | grep -iE 'nvidia|gpu' || true",
-		"sudo k3s kubectl get events -n gpu-operator --sort-by=.lastTimestamp | tail -25",
+		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-container-toolkit-daemonset --tail=100 --all-containers=true",
+		"echo '--- k3s containerd config: nvidia/cdi entries? ---'; sudo grep -iE 'nvidia|cdi|runtime' /var/lib/rancher/k3s/agent/etc/containerd/config.toml 2>/dev/null || echo 'no k3s containerd config or no nvidia/cdi entries'",
+		"echo '--- /etc/containerd ---'; sudo ls /etc/containerd/ 2>/dev/null || echo 'no /etc/containerd'",
+		"sudo k3s kubectl get events -n gpu-operator --sort-by=.lastTimestamp | tail -15",
 	}
 	for _, c := range cmds {
 		out, err := sshRun(t, ip, keyPath, c)
