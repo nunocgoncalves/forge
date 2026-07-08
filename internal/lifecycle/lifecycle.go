@@ -327,8 +327,6 @@ func gpuOperatorValues() []string {
 		"toolkit.env[1].value=/run/k3s/containerd/containerd.sock",
 		"toolkit.env[2].name=CONTAINERD_RUNTIME_CLASS",
 		"toolkit.env[2].value=nvidia",
-		"toolkit.env[3].name=CONTAINERD_SET_AS_DEFAULT",
-		"toolkit.env[3].value=true",
 	}
 }
 
