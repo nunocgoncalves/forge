@@ -51,30 +51,57 @@ func TestE2E(t *testing.T) {
 	// 1. ephemeral SSH keypair
 	pubKeyStr, privKeyPath := generateKey(t)
 
-	// 2. create droplet with cloud-init forge user
-	droplet, err := createDroplet(ctx, client, runID, pubKeyStr)
-	if err != nil {
-		t.Fatalf("create droplet: %v", err)
+	// 2. create droplet with cloud-init forge user. Provisioning is retried
+	//    because DO droplets occasionally never accept SSH within a reasonable
+	//    window (boot/cloud-init variance in fra1); a fresh droplet is cheaper
+	//    than failing the whole run. The successful droplet is cleaned up by the
+	//    defer; failed attempts are deleted inline (the reaper is the safety net).
+	var (
+		ip      string
+		droplet *godo.Droplet
+	)
+	const maxDropletAttempts = 2
+	for attempt := 1; attempt <= maxDropletAttempts; attempt++ {
+		d, err := createDroplet(ctx, client, runID, pubKeyStr)
+		if err != nil {
+			t.Logf("create droplet attempt %d/%d failed: %v", attempt, maxDropletAttempts, err)
+			if attempt < maxDropletAttempts {
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			t.Fatalf("create droplet failed after %d attempts: %v", maxDropletAttempts, err)
+		}
+		attemptIP, err := waitForIP(ctx, client, d.ID)
+		if err != nil {
+			t.Logf("wait for IP attempt %d/%d failed: %v", attempt, maxDropletAttempts, err)
+			deleteDroplet(ctx, client, d.ID)
+			if attempt < maxDropletAttempts {
+				continue
+			}
+			t.Fatalf("wait for IP failed after %d attempts: %v", maxDropletAttempts, err)
+		}
+		t.Logf("droplet ip %s (attempt %d/%d)", attemptIP, attempt, maxDropletAttempts)
+		if err := waitForHostReady(ctx, attemptIP, privKeyPath); err != nil {
+			t.Logf("host readiness attempt %d/%d failed: %v", attempt, maxDropletAttempts, err)
+			deleteDroplet(ctx, client, d.ID)
+			if attempt < maxDropletAttempts {
+				continue
+			}
+			t.Fatalf("host never became ready after %d droplet attempts: %v", maxDropletAttempts, err)
+		}
+		ip, droplet = attemptIP, d
+		break
 	}
 	defer func() {
+		if droplet == nil {
+			return
+		}
 		if keep {
 			t.Logf("keeping droplet %d (run %s) for debugging", droplet.ID, runID)
 			return
 		}
-		if _, err := client.Droplets.Delete(ctx, droplet.ID); err != nil {
-			t.Logf("warning: failed to delete droplet %d: %v (reaper will clean up)", droplet.ID, err)
-		}
+		deleteDroplet(ctx, client, droplet.ID)
 	}()
-
-	ip, err := waitForIP(ctx, client, droplet.ID)
-	if err != nil {
-		t.Fatalf("wait for IP: %v", err)
-	}
-	t.Logf("droplet ip %s", ip)
-
-	if err := waitForSSH(ctx, ip, privKeyPath); err != nil {
-		t.Fatalf("wait for SSH: %v", err)
-	}
 
 	// 3. build forge binary from the repo root
 	forgeBin := buildForge(t)
@@ -83,8 +110,12 @@ func TestE2E(t *testing.T) {
 	forgeHome := t.TempDir()
 	cfgPath := writeForgeConfig(t, runID, ip, privKeyPath)
 
-	// 5. forge apply (k3s + platform chart via helm)
-	out := runForge(t, forgeBin, forgeHome, "apply", "--config", cfgPath)
+	// 5. forge apply (k3s + platform chart via helm). Retried because the k3s
+	//    install script's binary download from GitHub releases is prone to
+	//    transient DO egress failures; `apply` is idempotent (re-reads live
+	//    state and reconciles) so re-running is safe. Only non-zero exits are
+	//    retried — a 0-exit missing "node ready: true" is a real regression.
+	out := applyWithRetry(t, forgeBin, forgeHome, cfgPath)
 	if !strings.Contains(out, "node ready: true") {
 		t.Fatalf("apply did not report node ready:\n%s", out)
 	}
@@ -157,6 +188,12 @@ func createDroplet(ctx context.Context, client *godo.Client, name, pubKeyStr str
 	return d, err
 }
 
+// deleteDroplet best-effort deletes a droplet. Failures are swallowed: the
+// reaper workflow (reaper.yml) cleans up any orphaned forge-e2e droplets.
+func deleteDroplet(ctx context.Context, client *godo.Client, id int) {
+	_, _ = client.Droplets.Delete(ctx, id)
+}
+
 func waitForIP(ctx context.Context, client *godo.Client, id int) (string, error) {
 	deadline := time.Now().Add(3 * time.Minute)
 	for {
@@ -193,6 +230,48 @@ func waitForSSH(ctx context.Context, ip, keyPath string) error {
 		case <-time.After(5 * time.Second):
 		}
 	}
+}
+
+// waitForHostReady waits until the droplet accepts SSH AND cloud-init has
+// finished applying its user-data (the forge user, passwordless sudo, curl).
+// Returning only once cloud-init reports "done" prevents forge's preflight from
+// racing cloud-init — e.g. `sudo -n true` failing with "passwordless sudo
+// required" before the sudoers rule is applied, or curl being absent before
+// `packages: [curl]` completes. The forge user is created by cloud-init, so SSH
+// can only succeed once cloud-init has at least started.
+func waitForHostReady(ctx context.Context, ip, keyPath string) error {
+	const deadline = 5 * time.Minute
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		client, err := sshDial(ip, keyPath)
+		if err == nil {
+			out, _ := sshOutput(client, "cloud-init status")
+			client.Close()
+			switch {
+			case strings.Contains(out, "status: done"):
+				return nil
+			case strings.Contains(out, "status: error"):
+				return fmt.Errorf("cloud-init failed on %s: %s", ip, strings.TrimSpace(out))
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+	}
+	return fmt.Errorf("host %s never became ready (SSH up + cloud-init done) within %s", ip, deadline)
+}
+
+// sshOutput runs a command over an SSH client and returns its combined output.
+func sshOutput(client *ssh.Client, cmd string) (string, error) {
+	sess, err := client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer sess.Close()
+	out, err := sess.CombinedOutput(cmd)
+	return string(out), err
 }
 
 func sshDial(ip, keyPath string) (*ssh.Client, error) {
@@ -262,15 +341,42 @@ spec:
 	return p
 }
 
-func runForge(t *testing.T, bin, forgeHome string, args ...string) string {
-	t.Helper()
+// runForgeE runs forge and returns its combined output and error (no t.Fatalf).
+func runForgeE(bin, forgeHome string, args ...string) (string, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Env = append(os.Environ(), "FORGE_HOME="+forgeHome)
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("forge %v: %v\n%s", args, err, out)
+	return string(out), err
+}
+
+// applyWithRetry runs `forge apply` with bounded retries on non-zero exit. The
+// k3s install script's binary download from GitHub releases is prone to
+// transient DO egress failures; `apply` is idempotent (re-reads live state and
+// reconciles), so re-running after a partial/failed install is safe. A 0-exit
+// whose output lacks the expected markers is not retried — that's a real
+// regression, not transient infra.
+func applyWithRetry(t *testing.T, bin, forgeHome, cfgPath string) string {
+	t.Helper()
+	const maxAttempts = 3
+	var out string
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		var err error
+		out, err = runForgeE(bin, forgeHome, "apply", "--config", cfgPath)
+		if err == nil {
+			if attempt > 1 {
+				t.Logf("apply succeeded on attempt %d/%d", attempt, maxAttempts)
+			}
+			return out
+		}
+		lastErr = err
+		t.Logf("apply attempt %d/%d failed: %v\n%s", attempt, maxAttempts, err, out)
+		if attempt < maxAttempts {
+			time.Sleep(10 * time.Second)
+		}
 	}
-	return string(out)
+	t.Fatalf("forge apply failed after %d attempts: %v\n%s", maxAttempts, lastErr, out)
+	return out
 }
 
 func checkNodeViaKubeconfig(t *testing.T, kcPath, wantLabelValue string) {
