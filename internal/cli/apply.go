@@ -71,7 +71,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	}
 	if cfg.Spec.GPU.Enabled {
 		fmt.Fprintf(out, "  gpu operator: %v\n", res.GPUOperatorApplied)
-		fmt.Fprintf(out, "  gpu ready:    %v\n", res.GPUReady)
+		fmt.Fprintf(out, "  gpu ready: %v\n", res.GPUReady)
 	}
 	return nil
 }
