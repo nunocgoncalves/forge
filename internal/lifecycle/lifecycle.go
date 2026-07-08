@@ -312,8 +312,12 @@ func waitForGPU(ctx context.Context, p provisioner.Provisioner, opts ApplyOpts) 
 // derives the host mounts from these and rewrites them to its in-container
 // paths). Without this the toolkit configures /etc/containerd and signals
 // /run/containerd/containerd.sock — neither of which k3s uses — and crashes.
-// forge is k3s-only in v1; revisit for HA/BYOK. CDI keeps nvidia non-default
-// (pods request nvidia.com/gpu; non-GPU pods stay on runc).
+// forge is k3s-only in v1; revisit for HA/BYOK. CDI is enabled, but on k3s the
+// nvidia runtime is what injects the GPU: workloads must set
+// runtimeClassName: nvidia AND request nvidia.com/gpu (a pod that only requests
+// nvidia.com/gpu, with no runtimeClassName, gets no device). nvidia stays
+// non-default, so non-GPU pods run on runc. This is the Q7 RuntimeClass
+// fallback — record it for HOR-306 (ModelBackend vLLM pod spec).
 func gpuOperatorValues() []string {
 	return []string{
 		"cdi.enabled=true",
