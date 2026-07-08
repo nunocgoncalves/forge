@@ -18,6 +18,7 @@ import (
 	"github.com/digitalocean/godo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -187,9 +188,10 @@ func TestGPUE2E(t *testing.T) {
 	forgeBin := buildForge(t)
 	forgeHome := t.TempDir()
 	cfgPath := writeForgeConfigGPU(t, runID, vm.IP, privKeyPath)
-	out := runForge(t, forgeBin, forgeHome, "apply", "--config", cfgPath)
-	if !strings.Contains(out, "gpu ready: true") {
-		t.Fatalf("apply did not report gpu ready:\n%s", out)
+	out, applyErr := runForgeAllowFail(t, forgeBin, forgeHome, "apply", "--config", cfgPath)
+	if applyErr != nil || !strings.Contains(out, "gpu ready: true") {
+		dumpGPUDiagnostics(t, vm.IP, privKeyPath)
+		t.Fatalf("forge apply did not reach gpu ready:\n%s\nerr=%v", out, applyErr)
 	}
 	t.Logf("apply output:\n%s", out)
 
@@ -279,4 +281,48 @@ func runForgeAllowFail(t *testing.T, bin, forgeHome string, args ...string) (str
 	cmd.Env = append(os.Environ(), "FORGE_HOME="+forgeHome)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// sshRun runs a command on the droplet over SSH and returns combined output.
+func sshRun(t *testing.T, ip, keyPath, cmd string) (string, error) {
+	t.Helper()
+	data, err := os.ReadFile(keyPath)
+	require.NoError(t, err)
+	signer, err := ssh.ParsePrivateKey(data)
+	require.NoError(t, err)
+	cfg := &ssh.ClientConfig{
+		User:            "forge",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // ephemeral test droplet
+		Timeout:         10 * time.Second,
+	}
+	client, err := ssh.Dial("tcp", ip+":22", cfg)
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+	sess, err := client.NewSession()
+	require.NoError(t, err)
+	defer sess.Close()
+	out, err := sess.CombinedOutput(cmd)
+	return string(out), err
+}
+
+// dumpGPUDiagnostics queries the GPU operator state on the droplet when the
+// readiness gate fails, so the cause (driver/toolkit/device-plugin/validator)
+// is visible in the test log rather than just "gpu not ready after 15m".
+func dumpGPUDiagnostics(t *testing.T, ip, keyPath string) {
+	t.Helper()
+	t.Log("=== GPU diagnostics ===")
+	cmds := []string{
+		"sudo k3s kubectl get clusterpolicy -o jsonpath='{range .items[*]}{.metadata.name}: state={.status.state}{\"\\n\"}{end}'",
+		"sudo k3s kubectl get clusterpolicy -o yaml | sed -n '/^status:/,$p'",
+		"sudo k3s kubectl get pods -n gpu-operator -o wide",
+		"sudo k3s kubectl get pods -A -o wide | grep -iE 'nvidia|gpu' || true",
+		"sudo k3s kubectl get events -n gpu-operator --sort-by=.lastTimestamp | tail -25",
+	}
+	for _, c := range cmds {
+		out, err := sshRun(t, ip, keyPath, c)
+		t.Logf("$ %s\n%s(err=%v)", c, out, err)
+	}
 }
