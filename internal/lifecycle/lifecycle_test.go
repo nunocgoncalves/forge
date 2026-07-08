@@ -416,7 +416,21 @@ func TestApply_GPU(t *testing.T) {
 	assert.Equal(t, "nvidia/gpu-operator", op.repository)
 	assert.Equal(t, "v26.3.3", op.version)
 	assert.Equal(t, "gpu-operator", op.namespace)
-	assert.Equal(t, []string{"cdi.enabled=true", "driver.enabled=true", "toolkit.enabled=true", "devicePlugin.enabled=true", "gfd.enabled=true"}, op.values)
+	assert.Equal(t, []string{
+		"cdi.enabled=true",
+		"driver.enabled=true",
+		"toolkit.enabled=true",
+		"devicePlugin.enabled=true",
+		"gfd.enabled=true",
+		"toolkit.env[0].name=CONTAINERD_CONFIG",
+		"toolkit.env[0].value=/var/lib/rancher/k3s/agent/etc/containerd/config.toml",
+		"toolkit.env[1].name=CONTAINERD_SOCKET",
+		"toolkit.env[1].value=/run/k3s/containerd/containerd.sock",
+		"toolkit.env[2].name=CONTAINERD_RUNTIME_CLASS",
+		"toolkit.env[2].value=nvidia",
+		"toolkit.env[3].name=CONTAINERD_SET_AS_DEFAULT",
+		"toolkit.env[3].value=true",
+	}, op.values)
 	assert.Equal(t, "opo1", chart.release)
 	assert.Equal(t, "0.1.0", chart.version)
 	assert.Equal(t, 1, p.ensureDepsCalls) // build deps ensured once
