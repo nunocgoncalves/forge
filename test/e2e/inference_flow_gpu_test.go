@@ -175,6 +175,7 @@ spec:
 	// 9. curl /v1/chat/completions with the gateway key -> a real completion.
 	status, body := chatCompletionsStatus(t, gwClient, gwBase, gatewayKey, alias)
 	if status != http.StatusOK {
+		dumpVLLMDiagnostics(t, c, namespace, mbName)
 		t.Fatalf("chat completions: status %d, want 200 (real completion)\n%s", status, body)
 	}
 	content := extractCompletion(body)
