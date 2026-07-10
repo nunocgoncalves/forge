@@ -293,8 +293,10 @@ func dumpVLLMDiagnostics(t *testing.T, c *kindtest.Cluster, namespace, mbName st
 	pod := strings.TrimSpace(c.Kubectl(t, "get", "pods", "-n", namespace, "-l", label,
 		"-o", "jsonpath={.items[0].metadata.name}"))
 	if pod != "" {
-		t.Logf("$ kubectl logs %s (vLLM startup / model download)", pod)
+		t.Logf("$ kubectl logs %s (vLLM current)", pod)
 		t.Log(c.PodLogs(t, namespace, pod, ""))
+		t.Logf("$ kubectl logs %s --previous (crash reason if restarted)", pod)
+		t.Log(c.Kubectl(t, "logs", "-n", namespace, pod, "--previous", "--tail=100"))
 	}
 	t.Log("$ kubectl get events -n " + namespace + " (sorted by time)")
 	t.Log(c.Kubectl(t, "get", "events", "-n", namespace, "--sort-by=.lastTimestamp"))
