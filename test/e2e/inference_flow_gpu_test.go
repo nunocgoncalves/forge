@@ -274,32 +274,32 @@ func waitForModelAvailable(t *testing.T, c *kindtest.Cluster, namespace, mbName 
 }
 
 // dumpVLLMDiagnostics queries the vLLM backend state when the model never
-// becomes available, so the cause (unschedulable nodeSelector, image pull,
-// crash, slow startup) is visible in the test log rather than just "not ready".
+// becomes available (or a completion fails), so the cause (unschedulable
+// nodeSelector, image pull, crash, slow startup) is visible in the test log
+// rather than just "not ready". Best-effort — mirrors dumpGPUDiagnostics: each
+// command is logged with its error + a failure doesn't abort the rest.
 func dumpVLLMDiagnostics(t *testing.T, c *kindtest.Cluster, namespace, mbName string) {
 	t.Helper()
 	t.Log("=== vLLM backend diagnostics ===")
 	label := "platform.iterabase.com/modelbackend=" + mbName
-	t.Logf("$ kubectl get modelbackend %s -o yaml", mbName)
-	t.Log(c.Kubectl(t, "get", "modelbackend", mbName, "-n", namespace, "-o", "yaml"))
-	t.Logf("$ kubectl get deployment %s -o wide", mbName)
-	t.Log(c.Kubectl(t, "get", "deployment", mbName, "-n", namespace, "-o", "wide"))
-	t.Logf("$ kubectl get pods -l %s -o wide", label)
-	t.Log(c.Kubectl(t, "get", "pods", "-n", namespace, "-l", label, "-o", "wide"))
-	t.Logf("$ kubectl describe pod -l %s", label)
-	t.Log(c.Kubectl(t, "describe", "pod", "-n", namespace, "-l", label))
-	t.Log("$ kubectl get nodes --show-labels (nvidia labels?)")
-	t.Log(c.Kubectl(t, "get", "nodes", "--show-labels"))
-	pod := strings.TrimSpace(c.Kubectl(t, "get", "pods", "-n", namespace, "-l", label,
-		"-o", "jsonpath={.items[0].metadata.name}"))
-	if pod != "" {
-		t.Logf("$ kubectl logs %s (vLLM current)", pod)
-		t.Log(c.PodLogs(t, namespace, pod, ""))
-		t.Logf("$ kubectl logs %s --previous (crash reason if restarted)", pod)
-		t.Log(c.Kubectl(t, "logs", "-n", namespace, pod, "--previous", "--tail=100"))
+	type kCmd struct {
+		desc string
+		args []string
 	}
-	t.Log("$ kubectl get events -n " + namespace + " (sorted by time)")
-	t.Log(c.Kubectl(t, "get", "events", "-n", namespace, "--sort-by=.lastTimestamp"))
+	cmds := []kCmd{
+		{"kubectl get modelbackend " + mbName + " -o yaml", []string{"get", "modelbackend", mbName, "-n", namespace, "-o", "yaml"}},
+		{"kubectl get deployment " + mbName + " -o wide", []string{"get", "deployment", mbName, "-n", namespace, "-o", "wide"}},
+		{"kubectl get pods -l " + label + " -o wide", []string{"get", "pods", "-n", namespace, "-l", label, "-o", "wide"}},
+		{"kubectl describe pod -l " + label, []string{"describe", "pod", "-n", namespace, "-l", label}},
+		{"kubectl get nodes --show-labels (nvidia labels?)", []string{"get", "nodes", "--show-labels"}},
+		{"kubectl logs -l " + label + " --tail=100 --all-containers=true (current)", []string{"logs", "-n", namespace, "-l", label, "--tail=100", "--all-containers=true"}},
+		{"kubectl logs -l " + label + " --previous --tail=100 (crash reason)", []string{"logs", "-n", namespace, "-l", label, "--previous", "--tail=100", "--all-containers=true"}},
+		{"kubectl get events -n " + namespace + " --sort-by=.lastTimestamp", []string{"get", "events", "-n", namespace, "--sort-by=.lastTimestamp"}},
+	}
+	for _, cm := range cmds {
+		out, err := c.KubectlE(t, cm.args...)
+		t.Logf("$ %s\n%s(err=%v)", cm.desc, out, err)
+	}
 }
 
 // extractCompletion pulls the text content from an OpenAI chat-completion
