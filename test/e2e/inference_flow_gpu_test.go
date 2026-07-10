@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -183,7 +182,11 @@ spec:
 	if content == "" {
 		t.Fatalf("completion response has no content:\n%s", body)
 	}
-	t.Logf("real completion (%s): %q", alias, truncate(content, 120))
+	preview := content
+	if len(preview) > 120 {
+		preview = preview[:120] + "…"
+	}
+	t.Logf("real completion (%s): %q", alias, preview)
 }
 
 // writeForgeConfigInferenceGPU writes a forge.yaml for the inference GPU e2e:
@@ -229,37 +232,23 @@ func waitForModelAvailable(t *testing.T, kubeconfig, namespace, mbName string, c
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var lastStatus int
-	var lastBody string
 	nextLog := time.Now().Add(2 * time.Minute)
 	earlyDiag := time.Now().Add(5 * time.Minute)
 	dumpedEarly := false
 	for time.Now().Before(deadline) {
-		req, err := http.NewRequest(http.MethodGet, baseURL+"/admin/v1/snapshot", nil)
-		if err != nil {
-			t.Fatalf("new request: %v", err)
-		}
-		req.Header.Set("X-Admin-Key", adminKey)
-		resp, err := client.Do(req)
+		catalog, status, err := snapshotCatalog(client, baseURL, adminKey)
 		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			lastStatus = resp.StatusCode
-			lastBody = string(body)
-			if resp.StatusCode == http.StatusOK {
-				var snap struct {
-					Catalog []catalogEntry `json:"catalog"`
-				}
-				if json.Unmarshal(body, &snap) == nil {
-					for _, e := range snap.Catalog {
-						if e.ModelID == alias && e.Available {
-							return e, true
-						}
+			lastStatus = status
+			if status == http.StatusOK {
+				for _, e := range catalog {
+					if e.ModelID == alias && e.Available {
+						return e, true
 					}
 				}
 			}
 		}
 		if time.Now().After(nextLog) {
-			t.Logf("waiting for %s: last status=%d body=%.200s", alias, lastStatus, lastBody)
+			t.Logf("waiting for %s: last status=%d", alias, lastStatus)
 			nextLog = time.Now().Add(2 * time.Minute)
 		}
 		// Early diagnostics at 5m: if the model is still unavailable, dump the
@@ -332,12 +321,4 @@ func extractCompletion(body string) string {
 		return ""
 	}
 	return resp.Choices[0].Message.Content
-}
-
-// truncate clips a string to n chars for log lines.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }

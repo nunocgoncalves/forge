@@ -261,34 +261,42 @@ func getSecretKey(t *testing.T, c *kindtest.Cluster, namespace, name, key string
 	return string(dec)
 }
 
-// waitForCatalogEntry polls the gateway's /admin/v1/snapshot (X-Admin-Key auth)
-// until the catalog contains the given alias, then returns it. Fails on timeout.
+// snapshotCatalog fetches the gateway's /admin/v1/snapshot (X-Admin-Key auth)
+// and returns the catalog entries + the HTTP status. Best-effort: a request or
+// parse error returns (nil, 0, err) so callers can keep polling.
+func snapshotCatalog(client *http.Client, baseURL, adminKey string) ([]catalogEntry, int, error) {
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/admin/v1/snapshot", nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("X-Admin-Key", adminKey)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var snap struct {
+		Catalog []catalogEntry `json:"catalog"`
+	}
+	if err := json.Unmarshal(body, &snap); err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return snap.Catalog, resp.StatusCode, nil
+}
+
+// waitForCatalogEntry polls the gateway's /admin/v1/snapshot until the catalog
+// contains the given alias, then returns it. Fails on timeout.
 // This is the LISTEN/NOTIFY propagation assertion.
 func waitForCatalogEntry(t *testing.T, client *http.Client, baseURL, adminKey, alias string, timeout time.Duration) catalogEntry {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		req, err := http.NewRequest(http.MethodGet, baseURL+"/admin/v1/snapshot", nil)
-		if err != nil {
-			t.Fatalf("new request: %v", err)
-		}
-		req.Header.Set("X-Admin-Key", adminKey)
-		resp, err := client.Do(req)
-		if err != nil {
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			var snap struct {
-				Catalog []catalogEntry `json:"catalog"`
-			}
-			if json.Unmarshal(body, &snap) == nil {
-				for _, e := range snap.Catalog {
-					if e.ModelID == alias {
-						return e
-					}
+		catalog, status, err := snapshotCatalog(client, baseURL, adminKey)
+		if err == nil && status == http.StatusOK {
+			for _, e := range catalog {
+				if e.ModelID == alias {
+					return e
 				}
 			}
 		}
