@@ -1,0 +1,55 @@
+name: e2e-inference
+
+on:
+  pull_request:
+    paths:
+      - "test/e2e/**"
+      - ".github/workflows/e2e-inference.yml"
+  schedule:
+    # Nightly 05:00 UTC — exercises the latest iterabase-platform chart release
+    # so control-plane↔gateway contract regressions surface within a day. The
+    # PR-time run only triggers on test/e2e/** changes, so a new chart release
+    # could go unverified without this. Staggered off the control-plane nightly
+    # (04:00 UTC) so the two independent kind bursts don't coincide.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+# Independent from the DigitalOcean GPU e2e (no token, no global serialization).
+concurrency:
+  group: e2e-inference-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  inference-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+
+      # Toolchain for the Kind-based chart-wiring harness.
+      - name: install kind + helm + kubectl
+        run: |
+          curl -sSL -o /tmp/kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+          curl -sSL https://get.helm.sh/helm-v3.18.0-linux-amd64.tar.gz | tar -xz -C /tmp
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          curl -sSL -o /tmp/kubectl "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+
+      # The iterabase-platform umbrella chart is published at
+      # oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform. The test
+      # auto-resolves the latest stable chart version (HOR-321), installs it into
+      # a Kind cluster, and exercises the control-plane↔gateway contract
+      # (catalog + API-key + capability propagation via LISTEN/NOTIFY).
+      - name: inference contract e2e
+        run: make test-e2e-inference
+        env:
+          # Authenticates the GitHub releases API call that auto-resolves the
+          # chart version (raises the rate limit from 60 to 5000 req/hour).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
