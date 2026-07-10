@@ -165,7 +165,7 @@ spec:
 	// 8. wait for vLLM to be ready: the gateway snapshot marks the model
 	//    available (the control-plane's ModelBackend reconciler sets healthy=true
 	//    once the vLLM Deployment is Available — model downloaded + serving).
-	entry, ok := waitForModelAvailable(t, gwClient, gwBase, gatewayAdminKey, alias, 25*time.Minute)
+	entry, ok := waitForModelAvailable(t, c, namespace, mbName, gwClient, gwBase, gatewayAdminKey, alias, 25*time.Minute)
 	if !ok {
 		dumpVLLMDiagnostics(t, c, namespace, mbName)
 		t.Fatalf("model %q never became available within 25m (vLLM pod not healthy; see diagnostics above)", alias)
@@ -219,14 +219,18 @@ spec:
 // waitForModelAvailable polls the gateway's /admin/v1/snapshot until the given
 // alias is present AND available=true (vLLM ready). The generous timeout covers
 // the vLLM image pull + model download + startup on the GPU droplet. Logs the
-// last status + body periodically. Returns (entry, false) on timeout so the
-// caller can dump diagnostics before failing.
-func waitForModelAvailable(t *testing.T, client *http.Client, baseURL, adminKey, alias string, timeout time.Duration) (catalogEntry, bool) {
+// last status + body periodically, and dumps vLLM pod diagnostics once at the
+// 5m mark (so a crash/image-pull issue is visible without waiting the full
+// timeout). Returns (entry, false) on timeout so the caller can dump final
+// diagnostics before failing.
+func waitForModelAvailable(t *testing.T, c *kindtest.Cluster, namespace, mbName string, client *http.Client, baseURL, adminKey, alias string, timeout time.Duration) (catalogEntry, bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var lastStatus int
 	var lastBody string
 	nextLog := time.Now().Add(2 * time.Minute)
+	earlyDiag := time.Now().Add(5 * time.Minute)
+	dumpedEarly := false
 	for time.Now().Before(deadline) {
 		req, err := http.NewRequest(http.MethodGet, baseURL+"/admin/v1/snapshot", nil)
 		if err != nil {
@@ -255,6 +259,13 @@ func waitForModelAvailable(t *testing.T, client *http.Client, baseURL, adminKey,
 		if time.Now().After(nextLog) {
 			t.Logf("waiting for %s: last status=%d body=%.200s", alias, lastStatus, lastBody)
 			nextLog = time.Now().Add(2 * time.Minute)
+		}
+		// Early diagnostics at 5m: if the model is still unavailable, dump the
+		// vLLM pod state + logs so the cause is visible without waiting 25m.
+		if !dumpedEarly && time.Now().After(earlyDiag) {
+			dumpedEarly = true
+			t.Logf("model %s still unavailable after 5m; dumping vLLM diagnostics", alias)
+			dumpVLLMDiagnostics(t, c, namespace, mbName)
 		}
 		time.Sleep(15 * time.Second)
 	}
