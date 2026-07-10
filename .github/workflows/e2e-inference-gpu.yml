@@ -1,15 +1,19 @@
 name: e2e-inference-gpu
 
 on:
-  # Not on PR: this is the slowest, most expensive test (GPU droplet + vLLM
-  # image pull + model download + serving = 30m+). The control-plane↔gateway
-  # contract is validated on every PR by TestInferenceFlowContract (kind, no
-  # GPU); this test is the nightly real-serving stamp. Run on-demand with
-  # workflow_dispatch when validating a release.
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "go.mod"
+      - "go.sum"
+      - "test/e2e/**"
+      - ".github/workflows/e2e-inference-gpu.yml"
   schedule:
-    # Nightly 03:30 UTC — catches real-serving regressions. Staggered off the
-    # forge GPU nightly (03:00 UTC); shares the e2e-gpu concurrency group so
-    # the two GPU tests never provision droplets concurrently.
+    # Nightly 03:30 UTC — catches regressions that slip when GPU capacity is
+    # scarce and the PR-time run skips. Staggered off the forge GPU nightly
+    # (03:00 UTC); shares the e2e-gpu concurrency group so the two GPU tests
+    # never provision droplets concurrently.
     - cron: "30 3 * * *"
   workflow_dispatch:
 
