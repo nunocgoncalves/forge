@@ -95,19 +95,6 @@ func (c *Cluster) Kubectl(t *testing.T, args ...string) string {
 	return run(t, "kubectl", full...)
 }
 
-// KubectlE runs kubectl and returns (output, error) without fataling — for
-// best-effort diagnostics where a failing command shouldn't abort the rest
-// (mirrors dumpGPUDiagnostics: log the error, keep going).
-func (c *Cluster) KubectlE(t *testing.T, args ...string) (string, error) {
-	t.Helper()
-	mustBin(t, "kubectl")
-	full := append([]string{"--kubeconfig", c.Kubeconfig}, args...)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "kubectl", full...).CombinedOutput()
-	return string(out), err
-}
-
 // FirstPodName returns the name of the first pod matching a label selector
 // (e.g. "app.kubernetes.io/component=api"), polling briefly until one exists.
 func (c *Cluster) FirstPodName(t *testing.T, namespace, selector string) string {
