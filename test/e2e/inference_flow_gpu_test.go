@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -165,9 +166,9 @@ spec:
 	// 8. wait for vLLM to be ready: the gateway snapshot marks the model
 	//    available (the control-plane's ModelBackend reconciler sets healthy=true
 	//    once the vLLM Deployment is Available — model downloaded + serving).
-	entry, ok := waitForModelAvailable(t, c, namespace, mbName, gwClient, gwBase, gatewayAdminKey, alias, 25*time.Minute)
+	entry, ok := waitForModelAvailable(t, c.Kubeconfig, namespace, mbName, gwClient, gwBase, gatewayAdminKey, alias, 25*time.Minute)
 	if !ok {
-		dumpVLLMDiagnostics(t, c, namespace, mbName)
+		dumpVLLMDiagnostics(t, c.Kubeconfig, namespace, mbName)
 		t.Fatalf("model %q never became available within 25m (vLLM pod not healthy; see diagnostics above)", alias)
 	}
 	t.Logf("model available: alias=%s backend=%s", entry.ModelID, entry.BackendURL)
@@ -175,7 +176,7 @@ spec:
 	// 9. curl /v1/chat/completions with the gateway key -> a real completion.
 	status, body := chatCompletionsStatus(t, gwClient, gwBase, gatewayKey, alias)
 	if status != http.StatusOK {
-		dumpVLLMDiagnostics(t, c, namespace, mbName)
+		dumpVLLMDiagnostics(t, c.Kubeconfig, namespace, mbName)
 		t.Fatalf("chat completions: status %d, want 200 (real completion)\n%s", status, body)
 	}
 	content := extractCompletion(body)
@@ -224,7 +225,7 @@ spec:
 // 5m mark (so a crash/image-pull issue is visible without waiting the full
 // timeout). Returns (entry, false) on timeout so the caller can dump final
 // diagnostics before failing.
-func waitForModelAvailable(t *testing.T, c *kindtest.Cluster, namespace, mbName string, client *http.Client, baseURL, adminKey, alias string, timeout time.Duration) (catalogEntry, bool) {
+func waitForModelAvailable(t *testing.T, kubeconfig, namespace, mbName string, client *http.Client, baseURL, adminKey, alias string, timeout time.Duration) (catalogEntry, bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var lastStatus int
@@ -266,11 +267,23 @@ func waitForModelAvailable(t *testing.T, c *kindtest.Cluster, namespace, mbName 
 		if !dumpedEarly && time.Now().After(earlyDiag) {
 			dumpedEarly = true
 			t.Logf("model %s still unavailable after 5m; dumping vLLM diagnostics", alias)
-			dumpVLLMDiagnostics(t, c, namespace, mbName)
+			dumpVLLMDiagnostics(t, kubeconfig, namespace, mbName)
 		}
 		time.Sleep(15 * time.Second)
 	}
 	return catalogEntry{}, false
+}
+
+// kubectlAllowFail runs kubectl with the given kubeconfig + returns (output,
+// error) without fataling — for best-effort diagnostics where a failing command
+// shouldn't abort the rest (mirrors runForgeAllowFail / sshRun in this package).
+func kubectlAllowFail(t *testing.T, kubeconfig string, args ...string) (string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	full := append([]string{"--kubeconfig", kubeconfig}, args...)
+	out, err := exec.CommandContext(ctx, "kubectl", full...).CombinedOutput()
+	return string(out), err
 }
 
 // dumpVLLMDiagnostics queries the vLLM backend state when the model never
@@ -278,7 +291,7 @@ func waitForModelAvailable(t *testing.T, c *kindtest.Cluster, namespace, mbName 
 // nodeSelector, image pull, crash, slow startup) is visible in the test log
 // rather than just "not ready". Best-effort — mirrors dumpGPUDiagnostics: each
 // command is logged with its error + a failure doesn't abort the rest.
-func dumpVLLMDiagnostics(t *testing.T, c *kindtest.Cluster, namespace, mbName string) {
+func dumpVLLMDiagnostics(t *testing.T, kubeconfig, namespace, mbName string) {
 	t.Helper()
 	t.Log("=== vLLM backend diagnostics ===")
 	label := "platform.iterabase.com/modelbackend=" + mbName
@@ -297,7 +310,7 @@ func dumpVLLMDiagnostics(t *testing.T, c *kindtest.Cluster, namespace, mbName st
 		{"kubectl get events -n " + namespace + " --sort-by=.lastTimestamp", []string{"get", "events", "-n", namespace, "--sort-by=.lastTimestamp"}},
 	}
 	for _, cm := range cmds {
-		out, err := c.KubectlE(t, cm.args...)
+		out, err := kubectlAllowFail(t, kubeconfig, cm.args...)
 		t.Logf("$ %s\n%s(err=%v)", cm.desc, out, err)
 	}
 }
