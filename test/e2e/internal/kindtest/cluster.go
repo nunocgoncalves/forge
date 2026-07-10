@@ -28,6 +28,15 @@ type Cluster struct {
 	t          *testing.T
 }
 
+// UseCluster wraps an existing kubeconfig (e.g. fetched from a forge-
+// provisioned cluster) with the Cluster helpers, without creating or deleting
+// a cluster. Used by the GPU e2e, which reuses the kubectl/port-forward helpers
+// against a remote k3s cluster instead of a local Kind cluster.
+func UseCluster(t *testing.T, name, kubeconfig string) *Cluster {
+	t.Helper()
+	return &Cluster{Name: name, Kubeconfig: kubeconfig, t: t}
+}
+
 // CreateCluster provisions a Kind cluster named `name` and registers cleanup to
 // delete it. It fails the test if `kind` is not on PATH. The kubeconfig is
 // written to a temp path so the cluster is fully isolated from the operator's
