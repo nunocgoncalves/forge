@@ -165,7 +165,11 @@ spec:
 	// 8. wait for vLLM to be ready: the gateway snapshot marks the model
 	//    available (the control-plane's ModelBackend reconciler sets healthy=true
 	//    once the vLLM Deployment is Available — model downloaded + serving).
-	entry := waitForModelAvailable(t, gwClient, gwBase, gatewayAdminKey, alias, 25*time.Minute)
+	entry, ok := waitForModelAvailable(t, gwClient, gwBase, gatewayAdminKey, alias, 25*time.Minute)
+	if !ok {
+		dumpVLLMDiagnostics(t, c, namespace, mbName)
+		t.Fatalf("model %q never became available within 25m (vLLM pod not healthy; see diagnostics above)", alias)
+	}
 	t.Logf("model available: alias=%s backend=%s", entry.ModelID, entry.BackendURL)
 
 	// 9. curl /v1/chat/completions with the gateway key -> a real completion.
@@ -215,8 +219,9 @@ spec:
 // waitForModelAvailable polls the gateway's /admin/v1/snapshot until the given
 // alias is present AND available=true (vLLM ready). The generous timeout covers
 // the vLLM image pull + model download + startup on the GPU droplet. Logs the
-// last status + body periodically + on failure for diagnosability.
-func waitForModelAvailable(t *testing.T, client *http.Client, baseURL, adminKey, alias string, timeout time.Duration) catalogEntry {
+// last status + body periodically. Returns (entry, false) on timeout so the
+// caller can dump diagnostics before failing.
+func waitForModelAvailable(t *testing.T, client *http.Client, baseURL, adminKey, alias string, timeout time.Duration) (catalogEntry, bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var lastStatus int
@@ -241,7 +246,7 @@ func waitForModelAvailable(t *testing.T, client *http.Client, baseURL, adminKey,
 				if json.Unmarshal(body, &snap) == nil {
 					for _, e := range snap.Catalog {
 						if e.ModelID == alias && e.Available {
-							return e
+							return e, true
 						}
 					}
 				}
@@ -253,9 +258,34 @@ func waitForModelAvailable(t *testing.T, client *http.Client, baseURL, adminKey,
 		}
 		time.Sleep(15 * time.Second)
 	}
-	t.Fatalf("model %q never became available within %s (last status=%d body=%.500s)",
-		alias, timeout, lastStatus, lastBody)
-	return catalogEntry{}
+	return catalogEntry{}, false
+}
+
+// dumpVLLMDiagnostics queries the vLLM backend state when the model never
+// becomes available, so the cause (unschedulable nodeSelector, image pull,
+// crash, slow startup) is visible in the test log rather than just "not ready".
+func dumpVLLMDiagnostics(t *testing.T, c *kindtest.Cluster, namespace, mbName string) {
+	t.Helper()
+	t.Log("=== vLLM backend diagnostics ===")
+	label := "platform.iterabase.com/modelbackend=" + mbName
+	t.Logf("$ kubectl get modelbackend %s -o yaml", mbName)
+	t.Log(c.Kubectl(t, "get", "modelbackend", mbName, "-n", namespace, "-o", "yaml"))
+	t.Logf("$ kubectl get deployment %s -o wide", mbName)
+	t.Log(c.Kubectl(t, "get", "deployment", mbName, "-n", namespace, "-o", "wide"))
+	t.Logf("$ kubectl get pods -l %s -o wide", label)
+	t.Log(c.Kubectl(t, "get", "pods", "-n", namespace, "-l", label, "-o", "wide"))
+	t.Logf("$ kubectl describe pod -l %s", label)
+	t.Log(c.Kubectl(t, "describe", "pod", "-n", namespace, "-l", label))
+	t.Log("$ kubectl get nodes --show-labels (nvidia labels?)")
+	t.Log(c.Kubectl(t, "get", "nodes", "--show-labels"))
+	pod := strings.TrimSpace(c.Kubectl(t, "get", "pods", "-n", namespace, "-l", label,
+		"-o", "jsonpath={.items[0].metadata.name}"))
+	if pod != "" {
+		t.Logf("$ kubectl logs %s (vLLM startup / model download)", pod)
+		t.Log(c.PodLogs(t, namespace, pod, ""))
+	}
+	t.Log("$ kubectl get events -n " + namespace + " (sorted by time)")
+	t.Log(c.Kubectl(t, "get", "events", "-n", namespace, "--sort-by=.lastTimestamp"))
 }
 
 // extractCompletion pulls the text content from an OpenAI chat-completion
