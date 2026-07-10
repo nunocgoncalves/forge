@@ -34,3 +34,6 @@ jobs:
         run: make test-e2e
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          # Authenticates the GitHub releases API call that auto-resolves the
+          # chart version (raises the rate limit from 60 to 5000 req/hour).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

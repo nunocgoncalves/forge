@@ -154,20 +154,22 @@ spec:
 	gatewayKey := createAPIKey(t, apiClient, apiBase+"/v1/api-keys", adminKey, identityID, "gateway")
 	t.Logf("issued gateway-scoped API key (prefix=%s)", keyPrefix(gatewayKey))
 
-	// 7. get the gateway's admin key (for /admin/v1/snapshot) + reach the gateway
-	//    via the droplet IP (ingress-nginx hostNetwork on 80).
+	// 7. get the gateway's admin key + port-forward the gateway. Port-forward
+	//    (not the droplet IP / ingress) so the readiness poll + the completion
+	//    request depend only on the gateway pod being up — not on ingress-nginx
+	//    scheduling on the GPU node (which can lag or be tainted differently).
 	gatewayAdminKey := getSecretKey(t, c, namespace, release+"-gateway-admin", "adminApiKey")
-	gwURL := fmt.Sprintf("http://%s", vm.IP)
+	gwBase, _ := c.PortForward(t, namespace, "svc/"+release+"-gateway", svcPort, 18081)
 	gwClient := &http.Client{Timeout: 300 * time.Second} // long timeout for inference
 
 	// 8. wait for vLLM to be ready: the gateway snapshot marks the model
 	//    available (the control-plane's ModelBackend reconciler sets healthy=true
 	//    once the vLLM Deployment is Available — model downloaded + serving).
-	entry := waitForModelAvailable(t, gwClient, gwURL, gatewayAdminKey, alias, 25*time.Minute)
+	entry := waitForModelAvailable(t, gwClient, gwBase, gatewayAdminKey, alias, 25*time.Minute)
 	t.Logf("model available: alias=%s backend=%s", entry.ModelID, entry.BackendURL)
 
 	// 9. curl /v1/chat/completions with the gateway key -> a real completion.
-	status, body := chatCompletionsStatus(t, gwClient, gwURL, gatewayKey, alias)
+	status, body := chatCompletionsStatus(t, gwClient, gwBase, gatewayKey, alias)
 	if status != http.StatusOK {
 		t.Fatalf("chat completions: status %d, want 200 (real completion)\n%s", status, body)
 	}
@@ -212,11 +214,14 @@ spec:
 
 // waitForModelAvailable polls the gateway's /admin/v1/snapshot until the given
 // alias is present AND available=true (vLLM ready). The generous timeout covers
-// the vLLM image pull + model download + startup on the GPU droplet.
+// the vLLM image pull + model download + startup on the GPU droplet. Logs the
+// last status + body periodically + on failure for diagnosability.
 func waitForModelAvailable(t *testing.T, client *http.Client, baseURL, adminKey, alias string, timeout time.Duration) catalogEntry {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
-	last := ""
+	var lastStatus int
+	var lastBody string
+	nextLog := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
 		req, err := http.NewRequest(http.MethodGet, baseURL+"/admin/v1/snapshot", nil)
 		if err != nil {
@@ -227,28 +232,29 @@ func waitForModelAvailable(t *testing.T, client *http.Client, baseURL, adminKey,
 		if err == nil {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			lastStatus = resp.StatusCode
+			lastBody = string(body)
 			if resp.StatusCode == http.StatusOK {
 				var snap struct {
 					Catalog []catalogEntry `json:"catalog"`
 				}
 				if json.Unmarshal(body, &snap) == nil {
 					for _, e := range snap.Catalog {
-						if e.ModelID == alias {
-							if e.Available {
-								return e
-							}
-							last = fmt.Sprintf("available=false (vLLM not ready yet)")
+						if e.ModelID == alias && e.Available {
+							return e
 						}
-					}
-					if last == "" {
-						last = "alias not yet in catalog"
 					}
 				}
 			}
 		}
+		if time.Now().After(nextLog) {
+			t.Logf("waiting for %s: last status=%d body=%.200s", alias, lastStatus, lastBody)
+			nextLog = time.Now().Add(2 * time.Minute)
+		}
 		time.Sleep(15 * time.Second)
 	}
-	t.Fatalf("model %q never became available within %s (last: %s)", alias, timeout, last)
+	t.Fatalf("model %q never became available within %s (last status=%d body=%.500s)",
+		alias, timeout, lastStatus, lastBody)
 	return catalogEntry{}
 }
 
