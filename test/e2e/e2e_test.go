@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/digitalocean/godo"
+	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -106,9 +107,15 @@ func TestE2E(t *testing.T) {
 	// 3. build forge binary from the repo root
 	forgeBin := buildForge(t)
 
-	// 4. write forge.yaml + set FORGE_HOME to a temp dir
+	// 4. write forge.yaml + set FORGE_HOME to a temp dir. The chart version is
+	//    auto-resolved to the latest stable iterabase-platform release (HOR-321)
+	//    so the test never drifts from the published charts.
+	chartVersion := os.Getenv("ITERABASE_CHART_VERSION")
+	if chartVersion == "" {
+		chartVersion = kindtest.LatestChartVersion(t, "iterabase-platform")
+	}
 	forgeHome := t.TempDir()
-	cfgPath := writeForgeConfig(t, runID, ip, privKeyPath)
+	cfgPath := writeForgeConfig(t, runID, ip, privKeyPath, chartVersion)
 
 	// 5. forge apply (k3s + platform chart via helm). Retried because the k3s
 	//    install script's binary download from GitHub releases is prone to
@@ -308,7 +315,7 @@ func buildForge(t *testing.T) string {
 	return bin
 }
 
-func writeForgeConfig(t *testing.T, name, ip, keyPath string) string {
+func writeForgeConfig(t *testing.T, name, ip, keyPath, chartVersion string) string {
 	t.Helper()
 	cfg := fmt.Sprintf(`apiVersion: forge.horizonshift.io/v1alpha1
 kind: Cluster
@@ -332,8 +339,8 @@ spec:
     serviceCIDRv6: fd43::/112
     disable: [traefik, servicelb]
   chart:
-    version: 0.1.0
-`, name, ip, keyPath, name)
+    version: %s
+`, name, ip, keyPath, name, chartVersion)
 	p := filepath.Join(t.TempDir(), "forge.yaml")
 	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
