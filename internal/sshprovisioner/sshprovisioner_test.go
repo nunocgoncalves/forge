@@ -612,3 +612,82 @@ func TestIsAptLockHeld(t *testing.T) {
 	assert.True(t, isAptLockHeld("...is held by process 1238 (apt-get)"))
 	assert.False(t, isAptLockHeld("E: Unable to locate package linux-headers-6.8.0"))
 }
+
+func TestOverlayer_Clone(t *testing.T) {
+	var gotClone, gotCheck string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v git":
+			return "/usr/bin/git\n", 0
+		case strings.Contains(cmd, "clone"):
+			gotClone = cmd
+			return "", 0
+		case strings.HasPrefix(cmd, "test -f "):
+			gotCheck = cmd
+			return "", 0
+		case strings.Contains(cmd, "rev-parse HEAD"):
+			return "deadbeef\n", 0
+		default: // rm -rf, mkdir -p
+			return "", 0
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	commit, err := p.Clone(context.Background(), "https://github.com/example/overlay.git", "master", "/var/lib/forge/overlay/opo1", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "deadbeef", commit)
+	assert.Contains(t, gotClone, "https://github.com/example/overlay.git")
+	assert.Contains(t, gotClone, "/var/lib/forge/overlay/opo1")
+	assert.Contains(t, gotCheck, "values.yaml")
+	assert.Contains(t, gotCheck, "values.client.yaml")
+	assert.Contains(t, gotCheck, "crds/client/kustomization.yaml")
+}
+
+func TestOverlayer_Clone_StructureValidation(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v git":
+			return "/usr/bin/git\n", 0
+		case strings.Contains(cmd, "clone"):
+			return "", 0
+		case strings.HasPrefix(cmd, "test -f "):
+			return "", 1 // structure missing
+		default:
+			return "", 0
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	_, err := p.Clone(context.Background(), "https://github.com/example/overlay.git", "master", "/var/lib/forge/overlay/opo1", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overlay structure")
+}
+
+func TestOverlayer_Clone_TokenCredFile(t *testing.T) {
+	var gotClone string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v git":
+			return "/usr/bin/git\n", 0
+		case strings.Contains(cmd, "clone"):
+			gotClone = cmd
+			return "", 0
+		case strings.HasPrefix(cmd, "test -f "):
+			return "", 0
+		case strings.Contains(cmd, "rev-parse HEAD"):
+			return "abc\n", 0
+		default: // cat > credFile (runStdin), rm -rf, mkdir -p
+			return "", 0
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	_, err := p.Clone(context.Background(), "https://github.com/example/overlay.git", "master", "/var/lib/forge/overlay/opo1", []byte("ghp_secret"))
+	require.NoError(t, err)
+	assert.NotContains(t, gotClone, "ghp_secret", "token must not appear in the clone command/ps")
+	assert.Contains(t, gotClone, "credential.helper=store --file=")
+	assert.Contains(t, gotClone, "https://github.com/example/overlay.git", "clone URL has no embedded token")
+}

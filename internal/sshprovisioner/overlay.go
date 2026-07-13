@@ -59,6 +59,13 @@ func (p *SSHProvisioner) Clone(ctx context.Context, repo, ref, dest string, toke
 		return "", fmt.Errorf("overlay clone: %w", err)
 	}
 
+	// Light structural validation: the overlay must have the files forge consumes.
+	// Fails fast with an actionable error instead of an opaque helm/kubectl failure.
+	if err := p.validateOverlayStructure(ctx, dest); err != nil {
+		_ = p.Remove(ctx, dest) // clean up the malformed clone
+		return "", err
+	}
+
 	commit, err := p.run(ctx, "git -C "+shellQuote(dest)+" rev-parse HEAD")
 	if err != nil {
 		return "", fmt.Errorf("overlay commit: %w", err)
@@ -82,6 +89,18 @@ func httpsHost(repo string) string {
 		s = s[:i]
 	}
 	return s
+}
+
+// validateOverlayStructure checks the cloned overlay has the files forge
+// consumes (values.yaml, values.client.yaml, crds/client/kustomization.yaml).
+func (p *SSHProvisioner) validateOverlayStructure(ctx context.Context, dest string) error {
+	check := "test -f " + shellQuote(dest+"/values.yaml") +
+		" && test -f " + shellQuote(dest+"/values.client.yaml") +
+		" && test -f " + shellQuote(dest+"/crds/client/kustomization.yaml")
+	if _, err := p.run(ctx, check); err != nil {
+		return fmt.Errorf("overlay structure: %s is missing values.yaml, values.client.yaml, or crds/client/kustomization.yaml", dest)
+	}
+	return nil
 }
 
 // runStdin runs cmd on the host with stdin supplied. The command string itself
