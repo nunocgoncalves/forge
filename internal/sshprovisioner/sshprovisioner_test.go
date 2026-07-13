@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -113,6 +114,11 @@ func serveSession(ch ssh.NewChannel, h handler) {
 		cmd := parseExecPayload(req.Payload)
 		out, code := h(cmd)
 		_ = req.Reply(true, nil)
+		// Commands that read stdin (runStdin: "cat > file") must drain stdin
+		// before exit-status so the client's write completes without EOF.
+		if strings.Contains(cmd, "cat >") {
+			_, _ = io.Copy(io.Discard, sch)
+		}
 		if out != "" {
 			_, _ = sch.Write([]byte(out))
 		}
