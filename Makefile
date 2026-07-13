@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-controlplane test-e2e-gpu test-e2e-inference test-e2e-inference-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
+.PHONY: build test test-unit test-e2e test-e2e-overlay test-e2e-controlplane test-e2e-gpu test-e2e-inference test-e2e-inference-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
 
 # Load .env if present (e.g. DIGITALOCEAN_TOKEN for e2e). .env is gitignored.
 -include .env
@@ -25,6 +25,9 @@ test-unit:
 
 test-e2e:
 	cd test/e2e && go test -race -count=1 -timeout 25m -run TestE2E .
+
+test-e2e-overlay:
+	cd test/e2e && go test -race -count=1 -timeout 25m -run TestE2EOverlay .
 
 test-e2e-controlplane:
 	cd test/e2e && go test -race -count=1 -timeout 15m -run TestControlPlaneIdentity ./...
