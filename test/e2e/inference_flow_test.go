@@ -138,7 +138,22 @@ spec:
 	//    nvidia.com/gpu) -> healthy=false -> available=false (honest). The gateway
 	//    returns 503, not a fake completion. This is the same reconciler path the
 	//    GPU E2E exercises with a real backend.
-	catManifest := fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
+	overlayDir := t.TempDir()
+	clientDir := filepath.Join(overlayDir, "crds", "client")
+	if err := os.MkdirAll(filepath.Join(overlayDir, "crds", "base"), 0o755); err != nil {
+		t.Fatalf("mkdir crds/base: %v", err)
+	}
+	if err := os.MkdirAll(clientDir, 0o755); err != nil {
+		t.Fatalf("mkdir crds/client: %v", err)
+	}
+	// Apply via the overlay's kustomize path (kubectl apply -k crds/client/) —
+	// the same mechanism forge uses (HOR-341) — validating the base/client
+	// composition renders + applies against the real CRDs.
+	mustWriteFile(t, filepath.Join(overlayDir, "crds", "base", "kustomization.yaml"),
+		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nmetadata:\n  name: overlay-crds-base\nresources: []\n")
+	mustWriteFile(t, filepath.Join(clientDir, "kustomization.yaml"),
+		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nmetadata:\n  name: overlay-crds-client\nresources:\n  - ../base\n  - modelbackend.yaml\n  - model.yaml\n")
+	mustWriteFile(t, filepath.Join(clientDir, "modelbackend.yaml"), fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
 kind: ModelBackend
 metadata:
   name: %s
@@ -146,8 +161,8 @@ metadata:
 spec:
   kind: vLLM
   model: Qwen/Qwen3.5-0.8B
----
-apiVersion: platform.iterabase.com/v1alpha1
+`, mbName, namespace))
+	mustWriteFile(t, filepath.Join(clientDir, "model.yaml"), fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
 kind: Model
 metadata:
   name: %s
@@ -158,10 +173,8 @@ spec:
   backendRef: %s
   transforms:
     rewrite_model_name: true
-`, mbName, namespace, mbName, namespace, alias, mbName)
-	catPath := filepath.Join(t.TempDir(), "catalog.yaml")
-	mustWriteFile(t, catPath, catManifest)
-	c.Kubectl(t, "apply", "-f", catPath, "-n", namespace)
+`, mbName, namespace, alias, mbName))
+	c.Kubectl(t, "apply", "-k", clientDir)
 	// Wait for the ModelBackend to be materialized (deployed=true; the Deployment
 	// is created even though the pod stays Pending on kind).
 	c.Kubectl(t, "wait", "-n", namespace, "modelbackend.platform.iterabase.com/"+mbName,
