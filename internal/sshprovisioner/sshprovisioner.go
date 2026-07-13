@@ -460,8 +460,18 @@ func kubectlCmd(args ...string) string {
 
 // ApplyKustomize implements deployer.Deployer: `kubectl apply -k dir` against
 // the k3s kubeconfig on the host. Used for overlay CRD instances (kubectl apply
-// -k crds/client/), after the chart so the CRD kinds exist. Idempotent.
+// -k crds/client/), after the chart so the CRD kinds exist. The dir is rendered
+// first with `kubectl kustomize`; an empty build (e.g. an overlay scaffold with
+// no instances) is a no-op — `kubectl apply -k` errors with "no objects passed
+// to apply" on an empty build. Idempotent.
 func (p *SSHProvisioner) ApplyKustomize(ctx context.Context, dir string) error {
+	rendered, err := p.run(ctx, kubectlCmd("kustomize", dir))
+	if err != nil {
+		return fmt.Errorf("kubectl kustomize: %w", err)
+	}
+	if strings.TrimSpace(rendered) == "" {
+		return nil // no objects to apply (empty overlay scaffold)
+	}
 	if _, err := p.run(ctx, kubectlCmd("apply", "-k", dir)); err != nil {
 		return fmt.Errorf("kubectl apply -k: %w", err)
 	}
