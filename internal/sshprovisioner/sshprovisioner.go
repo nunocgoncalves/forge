@@ -391,20 +391,23 @@ func (p *SSHProvisioner) ensureHelm(ctx context.Context) error {
 }
 
 // Apply implements deployer.Deployer: idempotent helm upgrade --install of a
-// Helm release, applying the given --set values (empty for the platform chart,
-// whose values come from the overlay), ensuring helm first.
-func (p *SSHProvisioner) Apply(ctx context.Context, release, repository, version, namespace string, values []string) error {
+// Helm release, applying -f value files (ValueFiles, in order) then --set values
+// (Values), ensuring helm first.
+func (p *SSHProvisioner) Apply(ctx context.Context, opts deployer.ApplyOpts) error {
 	if err := p.ensureHelm(ctx); err != nil {
 		return err
 	}
-	args := []string{"upgrade", "--install", release, repository,
-		"--version", version,
-		"-n", namespace,
+	args := []string{"upgrade", "--install", opts.Release, opts.Repository,
+		"--version", opts.Version,
+		"-n", opts.Namespace,
 		"--create-namespace",
 		"--wait",
 		"--timeout", "10m",
 	}
-	for _, v := range values {
+	for _, f := range opts.ValueFiles {
+		args = append(args, "-f", f)
+	}
+	for _, v := range opts.Values {
 		args = append(args, "--set", v)
 	}
 	if _, err := p.run(ctx, helmCmd(args...)); err != nil {
@@ -446,6 +449,29 @@ func (p *SSHProvisioner) EnsureRepo(ctx context.Context, name, url string) error
 	if _, err := p.run(ctx, helmCmd("repo", "add", "--force-update", name, url)); err != nil {
 		return fmt.Errorf("helm repo add %s: %w", name, err)
 	}
+	return nil
+}
+
+// kubectlCmd builds a sudo k3s kubectl command (uses the k3s kubeconfig
+// automatically, like NodeReady/GPUReady).
+func kubectlCmd(args ...string) string {
+	return joinArgs(append([]string{"sudo", "k3s", "kubectl"}, args...))
+}
+
+// ApplyKustomize implements deployer.Deployer: `kubectl apply -k dir` against
+// the k3s kubeconfig on the host. Used for overlay CRD instances (kubectl apply
+// -k crds/client/), after the chart so the CRD kinds exist. Idempotent.
+func (p *SSHProvisioner) ApplyKustomize(ctx context.Context, dir string) error {
+	if _, err := p.run(ctx, kubectlCmd("apply", "-k", dir)); err != nil {
+		return fmt.Errorf("kubectl apply -k: %w", err)
+	}
+	return nil
+}
+
+// DeleteKustomize implements deployer.Deployer: `kubectl delete -k dir`
+// (best-effort; for destroy). A missing resource is not an error.
+func (p *SSHProvisioner) DeleteKustomize(ctx context.Context, dir string) error {
+	_, _ = p.run(ctx, kubectlCmd("delete", "-k", dir, "--ignore-not-found=true"))
 	return nil
 }
 

@@ -228,7 +228,12 @@ func applyChart(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, o
 		return nil
 	}
 	ch := cfg.Spec.Chart
-	if err := d.Apply(ctx, ch.Release, ch.Repository, ch.Version, ch.Namespace, nil); err != nil {
+	if err := d.Apply(ctx, deployer.ApplyOpts{
+		Release:    ch.Release,
+		Repository: ch.Repository,
+		Version:    ch.Version,
+		Namespace:  ch.Namespace,
+	}); err != nil {
 		auditFail(cfg, "apply", err)
 		return fmt.Errorf("chart: %w", err)
 	}
@@ -260,7 +265,13 @@ func applyGPU(ctx context.Context, cfg *config.Cluster, p provisioner.Provisione
 		return fmt.Errorf("gpu operator repo: %w", err)
 	}
 	chartRef := gpuOperatorRepoName + "/" + g.Chart
-	if err := d.Apply(ctx, g.Release, chartRef, g.Version, g.Namespace, gpuOperatorValues()); err != nil {
+	if err := d.Apply(ctx, deployer.ApplyOpts{
+		Release:    g.Release,
+		Repository: chartRef,
+		Version:    g.Version,
+		Namespace:  g.Namespace,
+		Values:     gpuOperatorValues(),
+	}); err != nil {
 		auditFail(cfg, "apply-gpu", err)
 		return fmt.Errorf("gpu operator: %w", err)
 	}
