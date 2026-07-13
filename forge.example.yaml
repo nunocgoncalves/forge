@@ -23,10 +23,9 @@ spec:
     disable: [traefik, servicelb]   # umbrella chart owns ingress (HOR-239)
     extraArgs: []
   flux: { enabled: false }     # forge action; reserved, deferred (HOR-239+)
-  overlay:                     # reserved; empty for HOR-238
-    repo: ""
-    branch: main
-    path: ./overlay
+  overlay:                     # client-fork overlay repo; empty => overlay phase skipped (HOR-341)
+    repo: ""                   # client-fork git URL (https:// or file://); forge apply --overlay overrides
+    ref: master                # branch or tag (default master)
   chart:                       # platform umbrella chart (iterabase-platform); empty version => k3s-only
     version: 0.1.0             # chart version to install (semver)
     # repository: oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform  # default
