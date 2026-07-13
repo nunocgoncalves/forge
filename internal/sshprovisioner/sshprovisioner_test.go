@@ -697,3 +697,43 @@ func TestOverlayer_Clone_TokenCredFile(t *testing.T) {
 	assert.Contains(t, gotClone, "credential.helper=store --file=")
 	assert.Contains(t, gotClone, "https://github.com/example/overlay.git", "clone URL has no embedded token")
 }
+
+func TestDeployer_ApplyKustomize_Empty(t *testing.T) {
+	var applied bool
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case strings.Contains(cmd, "kustomize"):
+			return "", 0 // empty render (no objects)
+		case strings.Contains(cmd, "apply"):
+			applied = true
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.ApplyKustomize(context.Background(), "/var/lib/forge/overlay/opo1/crds/client"))
+	assert.False(t, applied, "empty kustomize => apply skipped (no objects)")
+}
+
+func TestDeployer_ApplyKustomize_Objects(t *testing.T) {
+	var applied bool
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case strings.Contains(cmd, "kustomize"):
+			return "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n", 0
+		case strings.Contains(cmd, "apply"):
+			applied = true
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.ApplyKustomize(context.Background(), "/var/lib/forge/overlay/opo1/crds/client"))
+	assert.True(t, applied, "non-empty kustomize => apply runs")
+}
