@@ -3,9 +3,12 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 
+	"github.com/nunocgoncalves/forge/internal/config"
 	"github.com/nunocgoncalves/forge/internal/lifecycle"
 	"github.com/nunocgoncalves/forge/internal/sshprovisioner"
 )
@@ -24,6 +27,7 @@ destroy' then 'forge apply'); version changes are routed to 'forge upgrade'.`,
 	cmd.Flags().Bool("skip-chart", false, "skip the platform chart phase (k3s only)")
 	cmd.Flags().Bool("skip-gpu", false, "skip the GPU readiness phase")
 	cmd.Flags().Bool("skip-overlay", false, "skip the overlay phase (clone + chart values + CRD instances)")
+	cmd.Flags().String("overlay", "", "overlay repo URL (client fork; https:// or file://; overrides forge.yaml overlay.repo)")
 	cmd.Flags().String("kubeconfig-out", "", "path to write the fetched kubeconfig (default ~/.forge/<install>/kubeconfig.yaml)")
 	return cmd
 }
@@ -32,6 +36,16 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	cfg, err := loadConfig(cmd)
 	if err != nil {
 		return err
+	}
+	// --overlay overrides forge.yaml overlay.repo (flag > config).
+	if overlayRepo, _ := cmd.Flags().GetString("overlay"); overlayRepo != "" {
+		cfg.Spec.Overlay.Repo = overlayRepo
+		if cfg.Spec.Overlay.Ref == "" {
+			cfg.Spec.Overlay.Ref = config.DefaultOverlayRef
+		}
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
 	}
 	log := newLogger(cmd)
 
@@ -57,12 +71,31 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	skipChart, _ := cmd.Flags().GetBool("skip-chart")
 	skipGPU, _ := cmd.Flags().GetBool("skip-gpu")
 	skipOverlay, _ := cmd.Flags().GetBool("skip-overlay")
+
+	// Resolve the overlay git token (only when the overlay phase will run).
+	// Public repos + CI proceed tokenless; private repos prompt (TTY) or use
+	// FORGE_OVERLAY_TOKEN.
+	var overlayToken []byte
+	if cfg.Spec.Overlay.Repo != "" && !skipOverlay {
+		envTok, _ := os.LookupEnv("FORGE_OVERLAY_TOKEN")
+		tok, err := resolveOverlayToken(ctx, cfg.Spec.Overlay.Repo, envTok, isTTY(), termPrompter{}, newGithubScopeChecker())
+		if err != nil {
+			return err
+		}
+		overlayToken = tok
+	}
+
 	log.Info("applying", "install", cfg.Metadata.Name)
-	res, err := lifecycle.Apply(ctx, cfg, p, p, p, lifecycle.ApplyOpts{KubeconfigOut: kcOut, SkipChart: skipChart, SkipGPU: skipGPU, SkipOverlay: skipOverlay})
+	res, err := lifecycle.Apply(ctx, cfg, p, p, p, lifecycle.ApplyOpts{KubeconfigOut: kcOut, SkipChart: skipChart, SkipGPU: skipGPU, SkipOverlay: skipOverlay, OverlayToken: overlayToken})
 	if err != nil {
 		return err
 	}
-	out := cmd.OutOrStdout()
+	printApplyResult(cmd.OutOrStdout(), cfg, res)
+	return nil
+}
+
+// printApplyResult writes the apply outcome summary.
+func printApplyResult(out io.Writer, cfg *config.Cluster, res *lifecycle.Result) {
 	fmt.Fprintln(out, "apply complete")
 	fmt.Fprintf(out, "  action:     %s\n", res.Plan.Action)
 	fmt.Fprintf(out, "  kubeconfig: %s\n", res.KubeconfigPath)
@@ -82,7 +115,6 @@ func runApply(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(out, "  overlay commit: %s\n", res.OverlayCommit)
 		}
 	}
-	return nil
 }
 
 func printPlan(cmd *cobra.Command, plan *lifecycle.ReconcilePlan) {
