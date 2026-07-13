@@ -14,6 +14,7 @@ import (
 	"github.com/nunocgoncalves/forge/internal/deployer"
 	"github.com/nunocgoncalves/forge/internal/k3s"
 	"github.com/nunocgoncalves/forge/internal/kubeconfig"
+	"github.com/nunocgoncalves/forge/internal/overlayer"
 	"github.com/nunocgoncalves/forge/internal/provisioner"
 	"github.com/nunocgoncalves/forge/internal/version"
 )
@@ -55,6 +56,8 @@ type ReconcilePlan struct {
 	ChartVersion       string // platform chart version to apply (empty => skip)
 	GPUEnabled         bool   // gpu.enabled; the GPU readiness phase will run
 	GPUOperatorVersion string // nvidia/gpu-operator chart version to install (empty => GPU disabled)
+	OverlayRepo        string // overlay.repo (empty => overlay phase skipped)
+	OverlayRef         string // overlay.ref (branch or tag)
 }
 
 // Result is the outcome of a mutating apply.
@@ -63,8 +66,10 @@ type Result struct {
 	KubeconfigPath     string
 	NodeReady          bool
 	ChartApplied       bool
-	GPUOperatorApplied bool // nvidia/gpu-operator release installed/upgraded
-	GPUReady           bool // ClusterPolicy reached state=ready (the GPU readiness gate)
+	GPUOperatorApplied bool   // nvidia/gpu-operator release installed/upgraded
+	GPUReady           bool   // ClusterPolicy reached state=ready (the GPU readiness gate)
+	OverlayApplied     bool   // overlay cloned + chart applied with overlay values + CRD instances applied
+	OverlayCommit      string // resolved overlay commit SHA
 }
 
 // ApplyOpts configures an apply run.
@@ -75,8 +80,10 @@ type ApplyOpts struct {
 	ReadyInterval    time.Duration // default 2s
 	SkipChart        bool          // skip the platform chart phase (k3s-only)
 	SkipGPU          bool          // skip the GPU readiness phase
+	SkipOverlay      bool          // skip the overlay phase (clone + chart values + CRD instances)
 	GPUReadyTimeout  time.Duration // default 15m (driver compile is slow on first boot)
 	GPUReadyInterval time.Duration // default 5s
+	OverlayToken     []byte        // https git token for a private overlay repo (nil => public/file://)
 }
 
 // withDefaults fills zero-valued timeouts/intervals with their defaults.
@@ -120,6 +127,8 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 		plan.GPUEnabled = true
 		plan.GPUOperatorVersion = cfg.Spec.GPU.Operator.Version
 	}
+	plan.OverlayRepo = cfg.Spec.Overlay.Repo
+	plan.OverlayRef = cfg.Spec.Overlay.Ref
 
 	if !pf.Installed {
 		if !pf.HasCurl {
@@ -162,7 +171,7 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 
 // Apply runs Plan and, unless DryRun, executes the install/reconcile, fetches
 // and stores the kubeconfig, and waits for the node to be Ready.
-func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, opts ApplyOpts) (*Result, error) {
+func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, opts ApplyOpts) (*Result, error) {
 	opts = opts.withDefaults()
 
 	plan, err := Plan(ctx, cfg, p)
@@ -211,9 +220,24 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		return res, err
 	}
 
-	if err := applyChart(ctx, cfg, d, opts, res); err != nil {
+	// Overlay phase: clone the client fork (if configured) → chart with overlay
+	// values → CRD instances (after the chart so the kinds exist).
+	overlayDest, overlayCommit, err := cloneOverlay(ctx, cfg, o, opts)
+	if err != nil {
+		auditFail(cfg, "apply-overlay", err)
 		return res, err
 	}
+	res.OverlayCommit = overlayCommit
+
+	if err := applyChart(ctx, cfg, d, opts, res, overlayDest); err != nil {
+		return res, err
+	}
+
+	if err := applyCRDInstances(ctx, d, overlayDest); err != nil {
+		auditFail(cfg, "apply-overlay", err)
+		return res, err
+	}
+	res.OverlayApplied = overlayDest != ""
 
 	_ = artifacts.AppendAudit(cfg.Metadata.Name, artifacts.AuditRecord{
 		Action: "apply", Result: "success", Version: version.String(),
@@ -222,23 +246,75 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 }
 
 // applyChart runs the platform chart phase (helm upgrade --install) when a chart
-// version is configured and the phase is not skipped. No-op otherwise.
-func applyChart(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result) error {
+// version is configured and the phase is not skipped. When an overlay is cloned
+// (overlayDest != ""), its value files feed the chart (-f values.yaml -f
+// values.client.yaml). No-op otherwise.
+func applyChart(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string) error {
 	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" {
 		return nil
 	}
 	ch := cfg.Spec.Chart
-	if err := d.Apply(ctx, deployer.ApplyOpts{
+	dopts := deployer.ApplyOpts{
 		Release:    ch.Release,
 		Repository: ch.Repository,
 		Version:    ch.Version,
 		Namespace:  ch.Namespace,
-	}); err != nil {
+	}
+	if overlayDest != "" {
+		dopts.ValueFiles = overlayValueFiles(overlayDest)
+	}
+	if err := d.Apply(ctx, dopts); err != nil {
 		auditFail(cfg, "apply", err)
 		return fmt.Errorf("chart: %w", err)
 	}
 	res.ChartApplied = true
 	return nil
+}
+
+// cloneOverlay clones the client fork when overlay.repo is configured, returning
+// the host dest path + resolved commit. Returns ("", "", nil) when the overlay
+// phase is skipped (no repo, SkipOverlay). Errors if a repo is set but no
+// overlayer is wired.
+func cloneOverlay(ctx context.Context, cfg *config.Cluster, o overlayer.Overlayer, opts ApplyOpts) (dest, commit string, err error) {
+	if cfg.Spec.Overlay.Repo == "" || opts.SkipOverlay {
+		return "", "", nil
+	}
+	if o == nil {
+		return "", "", fmt.Errorf("overlay.repo is set but no overlayer is wired (internal error)")
+	}
+	if err := o.EnsureGit(ctx); err != nil {
+		return "", "", fmt.Errorf("overlay git: %w", err)
+	}
+	dest = overlayDestPath(cfg)
+	commit, err = o.Clone(ctx, cfg.Spec.Overlay.Repo, cfg.Spec.Overlay.Ref, dest, opts.OverlayToken)
+	if err != nil {
+		return "", "", fmt.Errorf("overlay clone: %w", err)
+	}
+	return dest, commit, nil
+}
+
+// applyCRDInstances runs kubectl apply -k on the overlay's crds/client dir (after
+// the chart so the CRD kinds exist). No-op when no overlay is configured.
+func applyCRDInstances(ctx context.Context, d deployer.Deployer, overlayDest string) error {
+	if overlayDest == "" || d == nil {
+		return nil
+	}
+	if err := d.ApplyKustomize(ctx, overlayDest+"/crds/client"); err != nil {
+		return fmt.Errorf("overlay crd instances: %w", err)
+	}
+	return nil
+}
+
+// overlayDestPath is the host path where the overlay fork is cloned.
+func overlayDestPath(cfg *config.Cluster) string {
+	return "/var/lib/forge/overlay/" + cfg.Metadata.Name
+}
+
+// overlayValueFiles returns the -f value files from the cloned overlay, in order
+// (base then client; later wins). Both files always exist in a valid overlay
+// (values.client.yaml may be comment-only).
+func overlayValueFiles(dest string) []string {
+	return []string{dest + "/values.yaml", dest + "/values.client.yaml"}
 }
 
 // gpuOperatorRepoName is the local Helm repository name forge registers the
@@ -347,9 +423,14 @@ func gpuOperatorValues() []string {
 
 func isUbuntu(os string) bool { return strings.HasPrefix(os, "Ubuntu") }
 
-// Destroy removes the platform chart (if configured) and then uninstalls k3s.
-// Chart removal is best-effort so destroy always proceeds to substrate removal.
-func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer) error {
+// Destroy removes the overlay clone (host cleanup), the platform chart (if
+// configured), and then uninstalls k3s. Removal is best-effort so destroy always
+// proceeds to substrate removal (k3s-uninstall wipes all cluster resources,
+// including overlay CRD instances).
+func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer) error {
+	if o != nil && cfg.Spec.Overlay.Repo != "" {
+		_ = o.Remove(ctx, overlayDestPath(cfg))
+	}
 	if d != nil && cfg.Spec.Chart.Version != "" {
 		ch := cfg.Spec.Chart
 		_ = d.UninstallChart(ctx, ch.Release, ch.Namespace)

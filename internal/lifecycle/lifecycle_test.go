@@ -175,7 +175,7 @@ func TestApply_Install(t *testing.T) {
 		kubeconfig:        []byte(minKubeconfig),
 		readyAfterInstall: true,
 	}
-	res, err := Apply(context.Background(), testConfig(), p, nil, ApplyOpts{
+	res, err := Apply(context.Background(), testConfig(), p, nil, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -193,7 +193,7 @@ func TestApply_Install(t *testing.T) {
 func TestApply_DryRun(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig)}
-	res, err := Apply(context.Background(), testConfig(), p, nil, ApplyOpts{DryRun: true})
+	res, err := Apply(context.Background(), testConfig(), p, nil, nil, ApplyOpts{DryRun: true})
 	require.NoError(t, err)
 	assert.Equal(t, ActionInstall, res.Plan.Action)
 	assert.Empty(t, p.installs) // no install
@@ -207,7 +207,7 @@ func TestApply_RefuseImmutable(t *testing.T) {
 	st.ClusterCIDR = "10.99.0.0/16,fd42::/48"
 	p := &fakeProv{pf: readyPf(), state: st, kubeconfig: []byte(minKubeconfig)}
 	p.pf.Installed = true
-	_, err := Apply(context.Background(), testConfig(), p, nil, ApplyOpts{})
+	_, err := Apply(context.Background(), testConfig(), p, nil, nil, ApplyOpts{})
 	require.Error(t, err)
 	assert.Empty(t, p.installs)
 	assert.Contains(t, err.Error(), "immutable")
@@ -216,7 +216,7 @@ func TestApply_RefuseImmutable(t *testing.T) {
 func TestApply_NodeNotReady(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), ready: false}
-	_, err := Apply(context.Background(), testConfig(), p, nil, ApplyOpts{
+	_, err := Apply(context.Background(), testConfig(), p, nil, nil, ApplyOpts{
 		ReadyTimeout: 100 * time.Millisecond, ReadyInterval: 20 * time.Millisecond,
 	})
 	require.Error(t, err)
@@ -227,7 +227,7 @@ func TestApply_KubeconfigOut(t *testing.T) {
 	useTempHome(t)
 	out := filepath.Join(t.TempDir(), "kc.yaml")
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
-	res, err := Apply(context.Background(), testConfig(), p, nil, ApplyOpts{
+	res, err := Apply(context.Background(), testConfig(), p, nil, nil, ApplyOpts{
 		KubeconfigOut: out, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -307,6 +307,33 @@ func (f *fakeDeployer) UninstallChart(_ context.Context, release, ns string) err
 	return nil
 }
 
+// fakeOverlayer is a controllable overlayer.Overlayer for lifecycle overlay tests.
+type fakeOverlayer struct {
+	ensureGitErr error
+	cloneCommit  string
+	cloneErr     error
+	cloneCalls   []cloneCall
+	removeCalls  []string
+}
+
+type cloneCall struct {
+	repo, ref, dest string
+	hasToken        bool
+}
+
+func (f *fakeOverlayer) EnsureGit(_ context.Context) error { return f.ensureGitErr }
+func (f *fakeOverlayer) Clone(_ context.Context, repo, ref, dest string, token []byte) (string, error) {
+	f.cloneCalls = append(f.cloneCalls, cloneCall{repo, ref, dest, len(token) > 0})
+	if f.cloneErr != nil {
+		return "", f.cloneErr
+	}
+	return f.cloneCommit, nil
+}
+func (f *fakeOverlayer) Remove(_ context.Context, dest string) error {
+	f.removeCalls = append(f.removeCalls, dest)
+	return nil
+}
+
 func testConfigWithChart() *config.Cluster {
 	c := testConfig()
 	c.Spec.Chart = config.Chart{
@@ -322,7 +349,7 @@ func TestApply_Chart(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
-	res, err := Apply(context.Background(), testConfigWithChart(), p, d, ApplyOpts{
+	res, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -337,7 +364,7 @@ func TestApply_SkipChart(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
-	_, err := Apply(context.Background(), testConfigWithChart(), p, d, ApplyOpts{
+	_, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, ApplyOpts{
 		SkipChart: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -348,7 +375,7 @@ func TestDestroy_Chart(t *testing.T) {
 	p := &fakeProv{pf: readyPf(), state: inSyncState()}
 	p.pf.Installed = true
 	d := &fakeDeployer{}
-	require.NoError(t, Destroy(context.Background(), testConfigWithChart(), p, d))
+	require.NoError(t, Destroy(context.Background(), testConfigWithChart(), p, d, nil))
 	require.Len(t, d.uninstallCalls, 1)
 	assert.Equal(t, "opo1", d.uninstallCalls[0].release)
 	assert.False(t, p.state.Installed) // k3s uninstalled too
@@ -358,7 +385,7 @@ func TestDestroy_NoChart(t *testing.T) {
 	p := &fakeProv{pf: readyPf(), state: inSyncState()}
 	p.pf.Installed = true
 	d := &fakeDeployer{}
-	require.NoError(t, Destroy(context.Background(), testConfig(), p, d))
+	require.NoError(t, Destroy(context.Background(), testConfig(), p, d, nil))
 	assert.Empty(t, d.uninstallCalls) // no chart configured
 	assert.False(t, p.state.Installed)
 }
@@ -420,7 +447,7 @@ func TestApply_GPU(t *testing.T) {
 		gpuReady:          true,
 	}
 	d := &fakeDeployer{}
-	res, err := Apply(context.Background(), testConfigWithGPU(), p, d, ApplyOpts{
+	res, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
 	})
@@ -465,7 +492,7 @@ func TestApply_SkipGPU(t *testing.T) {
 		gpuReady:          true,
 	}
 	d := &fakeDeployer{}
-	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, ApplyOpts{
+	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, ApplyOpts{
 		SkipGPU: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -484,7 +511,7 @@ func TestApply_GPU_NotReady(t *testing.T) {
 		gpuReady:          false, // ClusterPolicy never reaches ready
 	}
 	d := &fakeDeployer{}
-	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, ApplyOpts{
+	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 		GPUReadyTimeout: 100 * time.Millisecond, GPUReadyInterval: 20 * time.Millisecond,
 	})
@@ -496,9 +523,104 @@ func TestDestroy_GPU(t *testing.T) {
 	p := &fakeProv{pf: gpuReadyPf(), state: inSyncState()}
 	p.pf.Installed = true
 	d := &fakeDeployer{}
-	require.NoError(t, Destroy(context.Background(), testConfigWithGPU(), p, d))
+	require.NoError(t, Destroy(context.Background(), testConfigWithGPU(), p, d, nil))
 	require.Len(t, d.uninstallCalls, 2)                               // chart + gpu operator
 	assert.Equal(t, "opo1", d.uninstallCalls[0].release)              // chart first
 	assert.Equal(t, "opo1-gpu-operator", d.uninstallCalls[1].release) // then operator
 	assert.False(t, p.state.Installed)                                // then k3s
+}
+
+func TestApply_Overlay(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	cfg := testConfigWithChart()
+	cfg.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
+
+	res, err := Apply(context.Background(), cfg, p, d, o, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.OverlayApplied)
+	assert.Equal(t, "deadbeef", res.OverlayCommit)
+
+	// overlay cloned with the configured repo/ref + dest; no token (public).
+	require.Len(t, o.cloneCalls, 1)
+	assert.Equal(t, "https://github.com/example/iterabase-overlay.git", o.cloneCalls[0].repo)
+	assert.Equal(t, "master", o.cloneCalls[0].ref)
+	assert.Equal(t, "/var/lib/forge/overlay/opo1", o.cloneCalls[0].dest)
+	assert.False(t, o.cloneCalls[0].hasToken)
+
+	// chart applied with overlay value files (-f values.yaml -f values.client.yaml).
+	require.Len(t, d.applyCalls, 1)
+	assert.Equal(t, []string{"/var/lib/forge/overlay/opo1/values.yaml", "/var/lib/forge/overlay/opo1/values.client.yaml"}, d.applyCalls[0].valueFiles)
+
+	// CRD instances applied via kustomize AFTER the chart (ordering: clone -> chart -> crds).
+	require.Len(t, d.applyKustomizeCalls, 1)
+	assert.Equal(t, "/var/lib/forge/overlay/opo1/crds/client", d.applyKustomizeCalls[0])
+}
+
+func TestApply_Overlay_TokenPassthrough(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "abc"}
+	cfg := testConfigWithChart()
+	cfg.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
+
+	_, err := Apply(context.Background(), cfg, p, d, o, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		OverlayToken: []byte("ghp_secret"),
+	})
+	require.NoError(t, err)
+	require.Len(t, o.cloneCalls, 1)
+	assert.True(t, o.cloneCalls[0].hasToken, "token passed through to Clone")
+}
+
+func TestApply_Overlay_SkippedWhenNoRepo(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{}
+	cfg := testConfigWithChart() // no overlay
+
+	res, err := Apply(context.Background(), cfg, p, d, o, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.OverlayApplied)
+	assert.Empty(t, o.cloneCalls, "no clone when overlay.repo is empty")
+	assert.Empty(t, d.applyKustomizeCalls, "no kustomize apply when no overlay")
+	require.Len(t, d.applyCalls, 1)
+	assert.Empty(t, d.applyCalls[0].valueFiles, "chart applied with no value files when no overlay")
+}
+
+func TestApply_Overlay_SkipFlag(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{}
+	cfg := testConfigWithChart()
+	cfg.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
+
+	res, err := Apply(context.Background(), cfg, p, d, o, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		SkipOverlay: true,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.OverlayApplied)
+	assert.Empty(t, o.cloneCalls, "SkipOverlay skips the clone")
+}
+
+func TestDestroy_Overlay(t *testing.T) {
+	p := &fakeProv{}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{}
+	cfg := testConfigWithChart()
+	cfg.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
+
+	require.NoError(t, Destroy(context.Background(), cfg, p, d, o))
+	require.Len(t, o.removeCalls, 1)
+	assert.Equal(t, "/var/lib/forge/overlay/opo1", o.removeCalls[0])
 }
