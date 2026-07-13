@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -84,11 +85,45 @@ type Flux struct {
 	Enabled bool `yaml:"enabled"`
 }
 
-// Overlay is the (reserved) overlay repo pointer.
+// Overlay is the client-fork overlay repo pointer (no base-ref). When Repo is
+// set, `forge apply` clones the fork on the host and applies its Helm values
+// (values.yaml + values.client.yaml) + CRD instances (kubectl apply -k
+// crds/client/). When empty, the overlay phase is skipped. v1 supports https://
+// (token-authenticated or public) and file:// repos; ssh:// / git@ support is a
+// fast-follow (different auth model — deploy key, not the https token).
 type Overlay struct {
-	Repo   string `yaml:"repo"`
-	Branch string `yaml:"branch"`
-	Path   string `yaml:"path"`
+	Repo string `yaml:"repo"` // client-fork git URL (https:// or file://); empty => overlay phase skipped
+	Ref  string `yaml:"ref"`  // branch or tag (default "master")
+}
+
+const DefaultOverlayRef = "master"
+
+// applyDefaults fills the overlay ref default when a repo is configured. With
+// no repo, the overlay phase is skipped and defaults stay empty.
+func (o *Overlay) applyDefaults() {
+	if o.Repo == "" {
+		return
+	}
+	if o.Ref == "" {
+		o.Ref = DefaultOverlayRef
+	}
+}
+
+// validate enforces v1 constraints on the overlay pointer. A missing repo is
+// valid (overlay phase skipped). A repo must be an https:// or file:// git URL
+// (v1 auth model: token over https; file:// for dev/test); the ref must be set
+// (applyDefaults fills the "master" default).
+func (o Overlay) validate() error {
+	if o.Repo == "" {
+		return nil
+	}
+	if !strings.HasPrefix(o.Repo, "https://") && !strings.HasPrefix(o.Repo, "file://") {
+		return fmt.Errorf("overlay.repo %q: v1 supports https:// and file:// repos (ssh:// / git@ is a fast-follow)", o.Repo)
+	}
+	if o.Ref == "" {
+		return fmt.Errorf("overlay.ref is required when overlay.repo is set")
+	}
+	return nil
 }
 
 // Chart is the platform umbrella chart pull pointer. An empty Version means
@@ -224,6 +259,7 @@ func (c *Cluster) Validate() error {
 	}
 	c.Spec.Chart.applyDefaults(c.Metadata.Name)
 	c.Spec.GPU.applyDefaults(c.Metadata.Name)
+	c.Spec.Overlay.applyDefaults()
 	return c.Spec.validate()
 }
 
@@ -244,6 +280,9 @@ func (s *Spec) validate() error {
 		}
 	}
 	if err := s.GPU.validate(s.Mode); err != nil {
+		return err
+	}
+	if err := s.Overlay.validate(); err != nil {
 		return err
 	}
 	return s.K3s.validate()

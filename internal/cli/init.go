@@ -27,6 +27,8 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().String("ssh-key", "~/.ssh/forge_ed25519", "SSH key path")
 	cmd.Flags().String("k3s-version", "v1.31.5+k3s1", "k3s version (full tag, e.g. v1.31.5+k3s1)")
 	cmd.Flags().Bool("dual-stack", true, "enable dual-stack IPv4+IPv6")
+	cmd.Flags().String("overlay", "", "overlay repo URL (client fork; https:// or file://; empty => no overlay)")
+	cmd.Flags().String("overlay-ref", "master", "overlay ref (branch or tag)")
 	cmd.Flags().Bool("force", false, "overwrite an existing config")
 	return cmd
 }
@@ -48,6 +50,8 @@ func runInit(cmd *cobra.Command, _ []string) error {
 	sshKey, _ := cmd.Flags().GetString("ssh-key")
 	k3sVersion, _ := cmd.Flags().GetString("k3s-version")
 	dualStack, _ := cmd.Flags().GetBool("dual-stack")
+	overlay, _ := cmd.Flags().GetString("overlay")
+	overlayRef, _ := cmd.Flags().GetString("overlay-ref")
 
 	if !nonInteractive {
 		in := bufio.NewReader(cmd.InOrStdin())
@@ -56,6 +60,7 @@ func runInit(cmd *cobra.Command, _ []string) error {
 		sshUser = prompt(in, "SSH user", sshUser)
 		sshKey = prompt(in, "SSH key path", sshKey)
 		k3sVersion = prompt(in, "k3s version", k3sVersion)
+		overlay = prompt(in, "Overlay repo URL (optional)", overlay)
 	}
 	if address == "" {
 		return fmt.Errorf("address is required")
@@ -83,6 +88,12 @@ func runInit(cmd *cobra.Command, _ []string) error {
 				Disable:       []string{"traefik", "servicelb"},
 			},
 		},
+	}
+	if overlay != "" {
+		if overlayRef == "" {
+			overlayRef = config.DefaultOverlayRef
+		}
+		cfg.Spec.Overlay = config.Overlay{Repo: overlay, Ref: overlayRef}
 	}
 	out, err := yaml.Marshal(cfg)
 	if err != nil {

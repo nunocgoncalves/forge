@@ -207,3 +207,43 @@ func TestGPUValidate_RequiresSingleNode(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "single-node")
 }
+
+func TestParse_OverlayDefaults(t *testing.T) {
+	c, err := Parse(yamlFor(t, func(cc *Cluster) {
+		cc.Spec.Overlay = Overlay{Repo: "https://github.com/example/iterabase-overlay.git"}
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/example/iterabase-overlay.git", c.Spec.Overlay.Repo)
+	assert.Equal(t, DefaultOverlayRef, c.Spec.Overlay.Ref, "overlay.ref defaults to master when repo is set")
+}
+
+func TestParse_OverlayEmptySkips(t *testing.T) {
+	c, err := Parse(yamlFor(t, func(cc *Cluster) {
+		cc.Spec.Overlay = Overlay{} // no repo => overlay phase skipped, no default applied
+	}))
+	require.NoError(t, err)
+	assert.Empty(t, c.Spec.Overlay.Repo)
+	assert.Empty(t, c.Spec.Overlay.Ref, "no default ref when repo is empty")
+}
+
+func TestParse_OverlayBadScheme(t *testing.T) {
+	for _, repo := range []string{
+		"git@github.com:example/iterabase-overlay.git",
+		"ssh://git@github.com/example/iterabase-overlay.git",
+		"example/iterabase-overlay",
+	} {
+		_, err := Parse(yamlFor(t, func(cc *Cluster) {
+			cc.Spec.Overlay = Overlay{Repo: repo, Ref: "master"}
+		}))
+		assert.ErrorContains(t, err, "overlay.repo", "expected scheme error for %q", repo)
+	}
+}
+
+func TestParse_OverlayFileURL(t *testing.T) {
+	c, err := Parse(yamlFor(t, func(cc *Cluster) {
+		cc.Spec.Overlay = Overlay{Repo: "file:///tmp/overlay"}
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, "file:///tmp/overlay", c.Spec.Overlay.Repo)
+	assert.Equal(t, DefaultOverlayRef, c.Spec.Overlay.Ref)
+}
