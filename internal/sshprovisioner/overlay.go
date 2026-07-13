@@ -37,7 +37,10 @@ func (p *SSHProvisioner) Clone(ctx context.Context, repo, ref, dest string, toke
 	if _, err := p.run(ctx, "rm -rf "+shellQuote(dest)); err != nil {
 		return "", fmt.Errorf("overlay remove: %w", err)
 	}
-	if _, err := p.run(ctx, "mkdir -p "+shellQuote(filepath.Dir(dest))); err != nil {
+	// Create the parent dir (e.g. /var/lib/forge/overlay) owned by the SSH user
+	// so the non-sudo git clone can write into it. sudo install -d creates the
+	// dir + parents with the given ownership.
+	if _, err := p.run(ctx, "sudo install -d -o $(id -un) -g $(id -gn) "+shellQuote(filepath.Dir(dest))); err != nil {
 		return "", fmt.Errorf("overlay mkdir: %w", err)
 	}
 
