@@ -1,9 +1,10 @@
-// Package deployer defines the cluster-level Helm release operations
-// interface — the testability seam for installing/upgrading/uninstalling Helm
-// releases (the iterabase-platform chart, the NVIDIA GPU Operator, etc.). The
-// real implementation lives in internal/sshprovisioner (helm runs on the host
-// over SSH, sharing the same transport as the k3s Provisioner); tests use
-// fakes. Lifecycle logic never talks to SSH or helm directly.
+// Package deployer defines the cluster-level manifest operations interface
+// (Helm + kustomize) — the testability seam for installing/upgrading/uninstalling
+// Helm releases (the iterabase-platform chart, the NVIDIA GPU Operator, etc.) and
+// applying kustomize directories (overlay CRD instances). The real implementation
+// lives in internal/sshprovisioner (helm + k3s kubectl run on the host over SSH,
+// sharing the same transport as the k3s Provisioner); tests use fakes. Lifecycle
+// logic never talks to SSH, helm, or kubectl directly.
 package deployer
 
 import "context"
@@ -16,14 +17,24 @@ type ChartState struct {
 	Version   string // installed chart version (semver)
 }
 
-// Deployer abstracts cluster-level platform chart operations. One instance is
-// bound to a single host (the same host the Provisioner bootstrap k3s on); helm
-// runs there over SSH using the k3s kubeconfig.
+// ApplyOpts configures a Helm release install/upgrade (helm upgrade --install).
+type ApplyOpts struct {
+	Release    string   // helm release name
+	Repository string   // chart ref (OCI URL, e.g. oci://.../iterabase-platform, or repo/name)
+	Version    string   // chart version (semver)
+	Namespace  string   // target namespace (--create-namespace)
+	Values     []string // --set inline values (e.g. GPU operator overrides)
+	ValueFiles []string // -f value files, applied in order (later wins); overlay values
+}
+
+// Deployer abstracts cluster-level manifest operations (Helm + kustomize). One
+// instance is bound to a single host (the same host the Provisioner bootstrapped
+// k3s on); helm + k3s kubectl run there over SSH using the k3s kubeconfig.
 type Deployer interface {
 	// Apply idempotently installs or upgrades a Helm release (helm upgrade
-	// --install), applying the given --set values (empty for the platform chart,
-	// whose values come from the overlay). It ensures helm is present first.
-	Apply(ctx context.Context, release, repository, version, namespace string, values []string) error
+	// --install), applying -f value files (ValueFiles, in order) then --set
+	// values (Values). It ensures helm is present first.
+	Apply(ctx context.Context, opts ApplyOpts) error
 	// EnsureRepo adds (or force-updates) a Helm repository on the host. Needed
 	// for repo-based charts (e.g. the NVIDIA GPU Operator); a no-op concern for
 	// OCI charts. Idempotent.
@@ -32,4 +43,11 @@ type Deployer interface {
 	Status(ctx context.Context, release, namespace string) (*ChartState, error)
 	// UninstallChart removes the helm release. A missing release is not an error.
 	UninstallChart(ctx context.Context, release, namespace string) error
+	// ApplyKustomize runs `kubectl apply -k dir` against the k3s kubeconfig on
+	// the host. Used for overlay CRD instances (kubectl apply -k crds/client/),
+	// after the chart so the CRD kinds exist. Idempotent.
+	ApplyKustomize(ctx context.Context, dir string) error
+	// DeleteKustomize runs `kubectl delete -k dir` (best-effort; for destroy). A
+	// missing resource is not an error.
+	DeleteKustomize(ctx context.Context, dir string) error
 }

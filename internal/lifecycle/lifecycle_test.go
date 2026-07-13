@@ -260,23 +260,39 @@ func TestUpgrade_NotInstalled(t *testing.T) {
 
 type applyCall struct {
 	release, repository, version, namespace string
-	values                                  []string
+	values, valueFiles                      []string
 }
 type repoCall struct{ name, url string }
 type uninstallCall struct{ release, namespace string }
 
 // fakeDeployer is a controllable deployer.Deployer for lifecycle chart tests.
 type fakeDeployer struct {
-	applyCalls     []applyCall
-	repoCalls      []repoCall
-	uninstallCalls []uninstallCall
-	statusState    deployer.ChartState
-	applyErr       error
+	applyCalls           []applyCall
+	repoCalls            []repoCall
+	uninstallCalls       []uninstallCall
+	applyKustomizeCalls  []string
+	deleteKustomizeCalls []string
+	statusState          deployer.ChartState
+	applyErr             error
 }
 
-func (f *fakeDeployer) Apply(_ context.Context, release, repo, version, ns string, values []string) error {
-	f.applyCalls = append(f.applyCalls, applyCall{release, repo, version, ns, values})
+func (f *fakeDeployer) Apply(_ context.Context, opts deployer.ApplyOpts) error {
+	f.applyCalls = append(f.applyCalls, applyCall{
+		release: opts.Release, repository: opts.Repository,
+		version: opts.Version, namespace: opts.Namespace,
+		values: opts.Values, valueFiles: opts.ValueFiles,
+	})
 	return f.applyErr
+}
+
+func (f *fakeDeployer) ApplyKustomize(_ context.Context, dir string) error {
+	f.applyKustomizeCalls = append(f.applyKustomizeCalls, dir)
+	return nil
+}
+
+func (f *fakeDeployer) DeleteKustomize(_ context.Context, dir string) error {
+	f.deleteKustomizeCalls = append(f.deleteKustomizeCalls, dir)
+	return nil
 }
 func (f *fakeDeployer) EnsureRepo(_ context.Context, name, url string) error {
 	f.repoCalls = append(f.repoCalls, repoCall{name, url})

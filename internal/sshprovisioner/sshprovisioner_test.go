@@ -18,6 +18,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nunocgoncalves/forge/internal/config"
+	"github.com/nunocgoncalves/forge/internal/deployer"
 	"github.com/nunocgoncalves/forge/internal/k3s"
 )
 
@@ -328,9 +329,11 @@ func TestDeployer_Apply(t *testing.T) {
 	defer cleanup()
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
-	require.NoError(t, p.Apply(context.Background(), "opo1",
-		"oci://ghcr.io/nunocgoncalves/iterabase-platform", "0.1.0", "iterabase-system",
-		[]string{"driver.enabled=true", "toolkit.enabled=true"}))
+	require.NoError(t, p.Apply(context.Background(), deployer.ApplyOpts{
+		Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
+		Version: "0.1.0", Namespace: "iterabase-system",
+		Values: []string{"driver.enabled=true", "toolkit.enabled=true"},
+	}))
 	assert.Contains(t, got, "--set")
 	assert.Contains(t, got, "driver.enabled=true")
 	assert.Contains(t, got, "toolkit.enabled=true")
@@ -352,8 +355,10 @@ func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 	defer cleanup()
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
-	require.NoError(t, p.Apply(context.Background(), "opo1",
-		"oci://ghcr.io/nunocgoncalves/iterabase-platform", "0.1.0", "iterabase-system", nil))
+	require.NoError(t, p.Apply(context.Background(), deployer.ApplyOpts{
+		Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
+		Version: "0.1.0", Namespace: "iterabase-system",
+	}))
 }
 
 func TestDeployer_Status(t *testing.T) {
