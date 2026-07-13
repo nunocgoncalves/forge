@@ -102,10 +102,12 @@ func resolveOverlayToken(ctx context.Context, repo, envToken string, interactive
 	return tok, nil
 }
 
-// isTTY reports whether stdin is a terminal (gates the interactive token prompt).
+// isTTY reports whether stdin is a terminal (gates the interactive token
+// prompt). Uses term.IsTerminal so /dev/null — a CharDevice but not a terminal,
+// e.g. a subprocess's default stdin in CI — is correctly treated as
+// non-interactive (no prompt, proceeds tokenless).
 func isTTY() bool {
-	fi, err := os.Stdin.Stat()
-	return err == nil && (fi.Mode()&os.ModeCharDevice) != 0
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // newGithubScopeChecker builds the production GitHub scope checker.
