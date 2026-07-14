@@ -114,9 +114,10 @@ func serveSession(ch ssh.NewChannel, h handler) {
 		cmd := parseExecPayload(req.Payload)
 		out, code := h(cmd)
 		_ = req.Reply(true, nil)
-		// Commands that read stdin (runStdin: "cat > file") must drain stdin
-		// before exit-status so the client's write completes without EOF.
-		if strings.Contains(cmd, "cat >") {
+		// Commands that read stdin (runStdin) must drain stdin before exit-status
+		// so the client's write completes cleanly: "cat > file" (overlay git cred)
+		// and "kubectl apply -f -" (secret-sync; the '-' arg is the stdin marker).
+		if strings.Contains(cmd, "cat >") || strings.Contains(cmd, "'-'") {
 			_, _ = io.Copy(io.Discard, sch)
 		}
 		if out != "" {
@@ -736,4 +737,74 @@ func TestDeployer_ApplyKustomize_Objects(t *testing.T) {
 	defer p.Close()
 	require.NoError(t, p.ApplyKustomize(context.Background(), "/var/lib/forge/overlay/opo1/crds/client"))
 	assert.True(t, applied, "non-empty kustomize => apply runs")
+}
+
+func TestDeployer_ApplyManifest(t *testing.T) {
+	var got string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		if strings.Contains(cmd, "apply") && strings.Contains(cmd, "-f") {
+			got = cmd
+			return "", 0
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	// A Secret manifest carrying the value in stringData; it is piped via stdin.
+	manifest := `{"apiVersion":"v1","kind":"Secret","metadata":{"name":"tok","namespace":"ns"},"stringData":{"api-token":"supersecret"}}`
+	require.NoError(t, p.ApplyManifest(context.Background(), manifest))
+	assert.Contains(t, got, "kubectl")
+	assert.Contains(t, got, "apply")
+	assert.Contains(t, got, "-f")
+	assert.NotContains(t, got, "supersecret", "value must be piped via stdin, not in the command/ps")
+	assert.NotContains(t, got, "stringData", "manifest must be piped via stdin, not in the command")
+}
+
+func TestDeployer_ApplyManifest_Error(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		if strings.Contains(cmd, "apply") && strings.Contains(cmd, "-f") {
+			return "error: no kind \"Secret\" is registered", 1
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	err := p.ApplyManifest(context.Background(), `{"apiVersion":"v1","kind":"Secret"}`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kubectl apply -f -")
+}
+
+func TestOverlayer_ReadFile(t *testing.T) {
+	t.Run("exists", func(t *testing.T) {
+		addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+			if strings.HasPrefix(cmd, "cat ") {
+				return "secrets: []\n", 0
+			}
+			return "", 1
+		})
+		defer cleanup()
+		p := newProvisioner(t, addr, cfg)
+		defer p.Close()
+		out, err := p.ReadFile(context.Background(), "/var/lib/forge/overlay/opo1", "secrets.yaml")
+		require.NoError(t, err)
+		assert.Equal(t, "secrets: []\n", out)
+	})
+	t.Run("missing", func(t *testing.T) {
+		// A missing file makes cat exit non-zero; the real host's stderr carries
+		// "No such file" (asserted via the lifecycle fake). Here we only assert
+		// the error surfaces — the fake SSH server can't emit stderr.
+		addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+			if strings.HasPrefix(cmd, "cat ") {
+				return "", 1
+			}
+			return "", 1
+		})
+		defer cleanup()
+		p := newProvisioner(t, addr, cfg)
+		defer p.Close()
+		_, err := p.ReadFile(context.Background(), "/var/lib/forge/overlay/opo1", "secrets.yaml")
+		require.Error(t, err)
+	})
 }

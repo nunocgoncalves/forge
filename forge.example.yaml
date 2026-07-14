@@ -31,6 +31,9 @@ spec:
     # repository: oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform  # default
     # release: opo1            # default: metadata.name
     # namespace: iterabase-system  # default
+  # K8s Secrets are declared in the overlay repo's secrets.yaml (name/ns/key/
+  # envVar; non-secret) + materialized from operator env vars — see HOR-364.
+  # Not in forge.yaml: the overlay is the runtime source of truth.
   gpu:                         # opt-in NVIDIA GPU node readiness (HOR-240); absent/false => skip
     enabled: true              # OPO1 has the RTX Pro 6000 (PCI passthrough is an OPO1/S11 concern, not forge)
     operator:

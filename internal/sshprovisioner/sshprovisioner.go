@@ -485,6 +485,18 @@ func (p *SSHProvisioner) DeleteKustomize(ctx context.Context, dir string) error 
 	return nil
 }
 
+// ApplyManifest implements deployer.Deployer: `kubectl apply -f -` against the
+// k3s kubeconfig on the host, with the manifest piped over SSH stdin. The
+// command string never contains the manifest, so secret values (stringData) are
+// never exposed in ps/history. Used by the secret-sync phase to ensure
+// namespaces + materialize Secrets. Idempotent (kubectl apply).
+func (p *SSHProvisioner) ApplyManifest(ctx context.Context, manifest string) error {
+	if _, err := p.runStdin(ctx, kubectlCmd("apply", "-f", "-"), manifest); err != nil {
+		return fmt.Errorf("kubectl apply -f -: %w", err)
+	}
+	return nil
+}
+
 type helmStatusJSON struct {
 	Info struct {
 		Status string `json:"status"`

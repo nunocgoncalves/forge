@@ -27,6 +27,7 @@ destroy' then 'forge apply'); version changes are routed to 'forge upgrade'.`,
 	cmd.Flags().Bool("skip-chart", false, "skip the platform chart phase (k3s only)")
 	cmd.Flags().Bool("skip-gpu", false, "skip the GPU readiness phase")
 	cmd.Flags().Bool("skip-overlay", false, "skip the overlay phase (clone + chart values + CRD instances)")
+	cmd.Flags().Bool("skip-secrets", false, "skip the secret-sync phase (materialize declared Secrets)")
 	cmd.Flags().String("overlay", "", "overlay repo URL (client fork; https:// or file://; overrides forge.yaml overlay.repo)")
 	cmd.Flags().String("kubeconfig-out", "", "path to write the fetched kubeconfig (default ~/.forge/<install>/kubeconfig.yaml)")
 	return cmd
@@ -71,6 +72,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	skipChart, _ := cmd.Flags().GetBool("skip-chart")
 	skipGPU, _ := cmd.Flags().GetBool("skip-gpu")
 	skipOverlay, _ := cmd.Flags().GetBool("skip-overlay")
+	skipSecrets, _ := cmd.Flags().GetBool("skip-secrets")
 
 	// Resolve the overlay git token (only when the overlay phase will run).
 	// Public repos + CI proceed tokenless; private repos prompt (TTY) or use
@@ -86,7 +88,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	}
 
 	log.Info("applying", "install", cfg.Metadata.Name)
-	res, err := lifecycle.Apply(ctx, cfg, p, p, p, lifecycle.ApplyOpts{KubeconfigOut: kcOut, SkipChart: skipChart, SkipGPU: skipGPU, SkipOverlay: skipOverlay, OverlayToken: overlayToken})
+	res, err := lifecycle.Apply(ctx, cfg, p, p, p, lifecycle.ApplyOpts{KubeconfigOut: kcOut, SkipChart: skipChart, SkipGPU: skipGPU, SkipOverlay: skipOverlay, SkipSecrets: skipSecrets, OverlayToken: overlayToken})
 	if err != nil {
 		return err
 	}
@@ -114,6 +116,9 @@ func printApplyResult(out io.Writer, cfg *config.Cluster, res *lifecycle.Result)
 		if res.OverlayCommit != "" {
 			fmt.Fprintf(out, "  overlay commit: %s\n", res.OverlayCommit)
 		}
+	}
+	if res.SecretsApplied {
+		fmt.Fprintf(out, "  secrets applied: true\n")
 	}
 }
 

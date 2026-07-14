@@ -84,6 +84,17 @@ func (p *SSHProvisioner) Remove(ctx context.Context, dest string) error {
 	return nil
 }
 
+// ReadFile implements overlayer.Overlayer: reads a file from the cloned overlay
+// on the host (e.g. secrets.yaml). A missing file surfaces as a cat error
+// ("No such file or directory") so the caller can treat optional files as absent.
+func (p *SSHProvisioner) ReadFile(ctx context.Context, dest, relPath string) (string, error) {
+	out, err := p.run(ctx, "cat "+shellQuote(filepath.Join(dest, relPath)))
+	if err != nil {
+		return "", fmt.Errorf("overlay read %s: %w", relPath, err)
+	}
+	return out, nil
+}
+
 // httpsHost extracts the host[:port] from an https:// URL (no path), used to
 // scope the credential-helper cred line to the repo's host.
 func httpsHost(repo string) string {
