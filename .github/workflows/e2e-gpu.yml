@@ -11,14 +11,18 @@ on:
       - ".github/workflows/e2e-gpu.yml"
   schedule:
     # Nightly 03:00 UTC — catches regressions that slip when GPU capacity is
-    # scarce and the PR-time run skips.
+    # scarce and the PR-time run skips. Runs both GPU tests sequentially in one
+    # job (one droplet at a time).
     - cron: "0 3 * * *"
   workflow_dispatch:
 
 # Serialize GPU e2e (one GPU droplet at a time); never cancel a running run so
-# its droplet is always torn down by the test rather than orphaned. The test
-# skips loudly (exit 0) when no GPU capacity is available, so a skipped run never
-# blocks a PR — only a real regression (non-skip failure) does.
+# its droplet is always torn down by the test rather than orphaned. Both GPU
+# tests run in ONE job (two steps) so a single push produces a single concurrency
+# request — avoiding the "Canceling since a higher priority waiting request
+# exists" churn that happened when e2e-gpu and e2e-inference-gpu were separate
+# workflows sharing this group (GitHub allows at most one running + one pending
+# per group, so the two separate workflows cancelled each other's pending runs).
 concurrency:
   group: e2e-gpu
   cancel-in-progress: false
@@ -36,7 +40,19 @@ jobs:
         with:
           go-version: "1.26.x"
 
-      - name: gpu e2e
+      - name: forge gpu e2e
         run: make test-e2e-gpu
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+
+      # Run the inference GPU e2e even if the forge GPU e2e failed (full signal);
+      # both tests skip loudly (exit 0) when no GPU capacity is available, so a
+      # skipped run never blocks a PR — only a real regression does.
+      - name: inference gpu e2e
+        if: always()
+        run: make test-e2e-inference-gpu
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          # Authenticates the GitHub releases API call that auto-resolves the
+          # umbrella chart version (raises the rate limit from 60 to 5000/hour).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

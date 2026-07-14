@@ -1,0 +1,39 @@
+name: e2e-overlay
+
+on:
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "go.mod"
+      - "go.sum"
+      - "test/e2e/**"
+      - ".github/workflows/e2e-overlay.yml"
+  workflow_dispatch:
+
+# Serialize with the baseline e2e (one droplet at a time); never cancel a running
+# run so its droplet is always torn down rather than orphaned.
+concurrency:
+  group: e2e-overlay
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  overlay-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+
+      - name: overlay e2e
+        run: make test-e2e-overlay
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          # Authenticates the GitHub releases API call that auto-resolves the
+          # chart version (raises the rate limit from 60 to 5000 req/hour).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
