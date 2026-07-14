@@ -24,22 +24,22 @@ test-unit:
 	$(GO) test -race -count=1 ./...
 
 test-e2e:
-	cd test/e2e && go test -race -count=1 -timeout 25m -run TestE2E .
+	cd test/e2e && go test -race -count=1 -timeout 25m -run '^TestE2E$$' .
 
 test-e2e-overlay:
-	cd test/e2e && go test -race -count=1 -timeout 25m -run TestE2EOverlay .
+	cd test/e2e && go test -race -count=1 -timeout 25m -run '^TestE2EOverlay$$' .
 
 test-e2e-controlplane:
-	cd test/e2e && go test -race -count=1 -timeout 15m -run TestControlPlaneIdentity ./...
+	cd test/e2e && go test -race -count=1 -timeout 15m -run '^TestControlPlaneIdentity$$' ./...
 
 test-e2e-gpu:
-	cd test/e2e && go test -race -count=1 -timeout 45m -run TestGPUE2E .
+	cd test/e2e && go test -race -count=1 -timeout 45m -run '^TestGPUE2E$$' .
 
 test-e2e-inference:
-	cd test/e2e && go test -race -count=1 -timeout 15m -run TestInferenceFlowContract .
+	cd test/e2e && go test -race -count=1 -timeout 15m -run '^TestInferenceFlowContract$$' .
 
 test-e2e-inference-gpu:
-	cd test/e2e && go test -race -count=1 -timeout 45m -run TestInferenceFlowGPU .
+	cd test/e2e && go test -race -count=1 -timeout 45m -run '^TestInferenceFlowGPU$$' .
 
 # Pure unit tests for the e2e harness internals (kindtest): fast, no network,
 # no cluster. Covers the chart auto-resolution helpers (HOR-321). The e2e
