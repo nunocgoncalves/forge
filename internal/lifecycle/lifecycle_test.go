@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -272,8 +273,11 @@ type fakeDeployer struct {
 	uninstallCalls       []uninstallCall
 	applyKustomizeCalls  []string
 	deleteKustomizeCalls []string
+	applyManifestCalls   []string // captured manifests (JSON) piped via stdin
+	order                []string // ordered op log: "manifest" | "apply" | "kustomize" (phase ordering)
 	statusState          deployer.ChartState
 	applyErr             error
+	applyManifestErr     error
 }
 
 func (f *fakeDeployer) Apply(_ context.Context, opts deployer.ApplyOpts) error {
@@ -282,17 +286,24 @@ func (f *fakeDeployer) Apply(_ context.Context, opts deployer.ApplyOpts) error {
 		version: opts.Version, namespace: opts.Namespace,
 		values: opts.Values, valueFiles: opts.ValueFiles,
 	})
+	f.order = append(f.order, "apply")
 	return f.applyErr
 }
 
 func (f *fakeDeployer) ApplyKustomize(_ context.Context, dir string) error {
 	f.applyKustomizeCalls = append(f.applyKustomizeCalls, dir)
+	f.order = append(f.order, "kustomize")
 	return nil
 }
 
 func (f *fakeDeployer) DeleteKustomize(_ context.Context, dir string) error {
 	f.deleteKustomizeCalls = append(f.deleteKustomizeCalls, dir)
 	return nil
+}
+func (f *fakeDeployer) ApplyManifest(_ context.Context, manifest string) error {
+	f.applyManifestCalls = append(f.applyManifestCalls, manifest)
+	f.order = append(f.order, "manifest")
+	return f.applyManifestErr
 }
 func (f *fakeDeployer) EnsureRepo(_ context.Context, name, url string) error {
 	f.repoCalls = append(f.repoCalls, repoCall{name, url})
@@ -309,17 +320,22 @@ func (f *fakeDeployer) UninstallChart(_ context.Context, release, ns string) err
 
 // fakeOverlayer is a controllable overlayer.Overlayer for lifecycle overlay tests.
 type fakeOverlayer struct {
-	ensureGitErr error
-	cloneCommit  string
-	cloneErr     error
-	cloneCalls   []cloneCall
-	removeCalls  []string
+	ensureGitErr    error
+	cloneCommit     string
+	cloneErr        error
+	cloneCalls      []cloneCall
+	removeCalls     []string
+	readFileContent string
+	readFileErr     error
+	readFileCalls   []readFileCall
 }
 
 type cloneCall struct {
 	repo, ref, dest string
 	hasToken        bool
 }
+
+type readFileCall struct{ dest, relPath string }
 
 func (f *fakeOverlayer) EnsureGit(_ context.Context) error { return f.ensureGitErr }
 func (f *fakeOverlayer) Clone(_ context.Context, repo, ref, dest string, token []byte) (string, error) {
@@ -332,6 +348,13 @@ func (f *fakeOverlayer) Clone(_ context.Context, repo, ref, dest string, token [
 func (f *fakeOverlayer) Remove(_ context.Context, dest string) error {
 	f.removeCalls = append(f.removeCalls, dest)
 	return nil
+}
+func (f *fakeOverlayer) ReadFile(_ context.Context, dest, relPath string) (string, error) {
+	f.readFileCalls = append(f.readFileCalls, readFileCall{dest, relPath})
+	if f.readFileErr != nil {
+		return "", f.readFileErr
+	}
+	return f.readFileContent, nil
 }
 
 func testConfigWithChart() *config.Cluster {
@@ -623,4 +646,132 @@ func TestDestroy_Overlay(t *testing.T) {
 	require.NoError(t, Destroy(context.Background(), cfg, p, d, o))
 	require.Len(t, o.removeCalls, 1)
 	assert.Equal(t, "/var/lib/forge/overlay/opo1", o.removeCalls[0])
+}
+
+func testConfigWithOverlay() *config.Cluster {
+	c := testConfigWithChart()
+	c.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
+	return c
+}
+
+// overlaySecretsYAML is a minimal overlay secrets.yaml for the secret-sync tests.
+func overlaySecretsYAML() string {
+	return `secrets:
+  - name: cloudflare-api-token
+    namespace: iterabase-system
+    key: api-token
+    envVar: FORGE_CLOUDFLARE_API_TOKEN
+`
+}
+
+func TestApply_Secrets(t *testing.T) {
+	useTempHome(t)
+	t.Setenv("FORGE_CLOUDFLARE_API_TOKEN", "supersecret-token")
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileContent: overlaySecretsYAML()}
+	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.SecretsApplied)
+
+	// namespace pre-create, then the secret manifest (stringData), via stdin.
+	require.Len(t, d.applyManifestCalls, 2)
+	assert.Contains(t, d.applyManifestCalls[0], `"Namespace"`)
+	assert.Contains(t, d.applyManifestCalls[0], `"iterabase-system"`)
+	assert.Contains(t, d.applyManifestCalls[1], `"Secret"`)
+	assert.Contains(t, d.applyManifestCalls[1], `"cloudflare-api-token"`)
+	assert.Contains(t, d.applyManifestCalls[1], `"api-token"`)
+	assert.Contains(t, d.applyManifestCalls[1], "supersecret-token", "value piped via stdin manifest")
+
+	// the value never reaches helm values (it stays out of the release secret).
+	for _, c := range d.applyCalls {
+		for _, v := range c.values {
+			assert.NotContains(t, v, "supersecret-token")
+		}
+	}
+
+	// secrets.yaml was read from the cloned overlay.
+	require.Len(t, o.readFileCalls, 1)
+	assert.Equal(t, "secrets.yaml", o.readFileCalls[0].relPath)
+
+	// secrets are applied AFTER the overlay clone + BEFORE the chart so
+	// cert-manager finds them on first reconcile.
+	manifestIdx, applyIdx := -1, -1
+	for i, op := range d.order {
+		if op == "manifest" && manifestIdx == -1 {
+			manifestIdx = i
+		}
+		if op == "apply" && applyIdx == -1 {
+			applyIdx = i
+		}
+	}
+	assert.GreaterOrEqual(t, manifestIdx, 0)
+	assert.GreaterOrEqual(t, applyIdx, 0)
+	assert.Less(t, manifestIdx, applyIdx, "secrets applied before chart")
+}
+
+func TestApply_Secrets_UnsetEnv(t *testing.T) {
+	useTempHome(t)
+	// Force the env var to be absent (LookupEnv ok=false), regardless of the
+	// operator's environment, restoring it after the test.
+	if old, ok := os.LookupEnv("FORGE_CLOUDFLARE_API_TOKEN"); ok {
+		os.Unsetenv("FORGE_CLOUDFLARE_API_TOKEN")
+		t.Cleanup(func() { os.Setenv("FORGE_CLOUDFLARE_API_TOKEN", old) })
+	}
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileContent: overlaySecretsYAML()}
+	_, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "FORGE_CLOUDFLARE_API_TOKEN")
+	assert.Contains(t, err.Error(), "unset")
+	assert.Empty(t, d.applyCalls, "chart not applied when a secret env var is missing")
+	assert.Len(t, d.applyManifestCalls, 1, "namespace pre-created before the env check fails")
+}
+
+func TestApply_SkipSecrets(t *testing.T) {
+	useTempHome(t)
+	t.Setenv("FORGE_CLOUDFLARE_API_TOKEN", "supersecret-token")
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileContent: overlaySecretsYAML()}
+	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, ApplyOpts{
+		SkipSecrets: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.SecretsApplied)
+	assert.Empty(t, d.applyManifestCalls, "SkipSecrets skips materialization")
+	assert.Empty(t, o.readFileCalls, "SkipSecrets skips reading secrets.yaml")
+}
+
+func TestApply_Secrets_NoSecretsFile(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	// overlay cloned but has no secrets.yaml (ReadFile returns not-found).
+	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileErr: errors.New("overlay read secrets.yaml: No such file or directory")}
+	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.SecretsApplied)
+	assert.Empty(t, d.applyManifestCalls, "no secrets.yaml ⇒ no materialization")
+}
+
+func TestApply_Secrets_NoOverlay(t *testing.T) {
+	useTempHome(t)
+	t.Setenv("FORGE_CLOUDFLARE_API_TOKEN", "supersecret-token")
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{} // no overlay.repo ⇒ no clone
+	res, err := Apply(context.Background(), testConfigWithChart(), p, d, o, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.SecretsApplied)
+	assert.Empty(t, d.applyManifestCalls, "no overlay ⇒ no secrets")
 }

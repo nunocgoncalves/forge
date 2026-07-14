@@ -25,4 +25,9 @@ type Overlayer interface {
 	// Remove deletes the cloned overlay directory (destroy / re-clone).
 	// Best-effort: a missing dir is not an error.
 	Remove(ctx context.Context, dest string) error
+	// ReadFile reads a file from the cloned overlay on the host (e.g. secrets.yaml).
+	// A missing file returns an error whose message contains "No such file" so the
+	// caller can treat an optional file (like secrets.yaml) as absent. Used by the
+	// secret-sync phase to read the overlay's non-secret secret declarations.
+	ReadFile(ctx context.Context, dest, relPath string) (string, error)
 }

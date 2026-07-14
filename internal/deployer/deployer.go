@@ -47,6 +47,11 @@ type Deployer interface {
 	// the host. Used for overlay CRD instances (kubectl apply -k crds/client/),
 	// after the chart so the CRD kinds exist. Idempotent.
 	ApplyKustomize(ctx context.Context, dir string) error
+	// ApplyManifest applies a Kubernetes manifest (JSON/YAML) via `kubectl apply
+	// -f -` over SSH stdin, so secret values never appear in the command string
+	// or ps. Used by the secret-sync phase to ensure namespaces + materialize
+	// Secrets from operator-local env vars. Idempotent (kubectl apply).
+	ApplyManifest(ctx context.Context, manifest string) error
 	// DeleteKustomize runs `kubectl delete -k dir` (best-effort; for destroy). A
 	// missing resource is not an error.
 	DeleteKustomize(ctx context.Context, dir string) error

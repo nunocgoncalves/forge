@@ -70,6 +70,7 @@ type Result struct {
 	GPUReady           bool   // ClusterPolicy reached state=ready (the GPU readiness gate)
 	OverlayApplied     bool   // overlay cloned + chart applied with overlay values + CRD instances applied
 	OverlayCommit      string // resolved overlay commit SHA
+	SecretsApplied     bool   // declared Secrets materialized from operator env vars
 }
 
 // ApplyOpts configures an apply run.
@@ -81,6 +82,7 @@ type ApplyOpts struct {
 	SkipChart        bool          // skip the platform chart phase (k3s-only)
 	SkipGPU          bool          // skip the GPU readiness phase
 	SkipOverlay      bool          // skip the overlay phase (clone + chart values + CRD instances)
+	SkipSecrets      bool          // skip the secret-sync phase (materialize declared Secrets)
 	GPUReadyTimeout  time.Duration // default 15m (driver compile is slow on first boot)
 	GPUReadyInterval time.Duration // default 5s
 	OverlayToken     []byte        // https git token for a private overlay repo (nil => public/file://)
@@ -220,24 +222,10 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		return res, err
 	}
 
-	// Overlay phase: clone the client fork (if configured) → chart with overlay
-	// values → CRD instances (after the chart so the kinds exist).
-	overlayDest, overlayCommit, err := cloneOverlay(ctx, cfg, o, opts)
-	if err != nil {
-		auditFail(cfg, "apply-overlay", err)
+	// Overlay phase: clone → secret-sync → chart → CRD instances.
+	if err := applyOverlayPhase(ctx, cfg, o, d, opts, res); err != nil {
 		return res, err
 	}
-	res.OverlayCommit = overlayCommit
-
-	if err := applyChart(ctx, cfg, d, opts, res, overlayDest); err != nil {
-		return res, err
-	}
-
-	if err := applyCRDInstances(ctx, d, overlayDest); err != nil {
-		auditFail(cfg, "apply-overlay", err)
-		return res, err
-	}
-	res.OverlayApplied = overlayDest != ""
 
 	_ = artifacts.AppendAudit(cfg.Metadata.Name, artifacts.AuditRecord{
 		Action: "apply", Result: "success", Version: version.String(),
@@ -302,6 +290,32 @@ func applyCRDInstances(ctx context.Context, d deployer.Deployer, overlayDest str
 	if err := d.ApplyKustomize(ctx, overlayDest+"/crds/client"); err != nil {
 		return fmt.Errorf("overlay crd instances: %w", err)
 	}
+	return nil
+}
+
+// applyOverlayPhase runs the overlay phase: clone the client fork → secret-sync
+// (reads the overlay's secrets.yaml) → chart with overlay values → CRD
+// instances. Each step no-ops when unconfigured/skipped. Runs after GPU
+// readiness (substrate before app).
+func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Overlayer, d deployer.Deployer, opts ApplyOpts, res *Result) error {
+	overlayDest, overlayCommit, err := cloneOverlay(ctx, cfg, o, opts)
+	if err != nil {
+		auditFail(cfg, "apply-overlay", err)
+		return err
+	}
+	res.OverlayCommit = overlayCommit
+	if err := applySecrets(ctx, o, d, opts, res, overlayDest); err != nil {
+		auditFail(cfg, "apply-secrets", err)
+		return err
+	}
+	if err := applyChart(ctx, cfg, d, opts, res, overlayDest); err != nil {
+		return err
+	}
+	if err := applyCRDInstances(ctx, d, overlayDest); err != nil {
+		auditFail(cfg, "apply-overlay", err)
+		return err
+	}
+	res.OverlayApplied = overlayDest != ""
 	return nil
 }
 
