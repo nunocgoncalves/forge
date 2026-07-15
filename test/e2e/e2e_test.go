@@ -120,6 +120,8 @@ func TestE2E(t *testing.T) {
 		defer sc.Close()
 		out, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get pods -A 2>&1")
 		t.Logf("debug pod dump (on failure):\n%s", out)
+		wl, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get deploy,daemonset,statefulset,job -A 2>&1")
+		t.Logf("debug workloads (deploy/ds/sts/job):\n%s", wl)
 		ev, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get events -A --sort-by=.lastTimestamp 2>&1 | tail -30")
 		t.Logf("debug events (tail):\n%s", ev)
 	}()
