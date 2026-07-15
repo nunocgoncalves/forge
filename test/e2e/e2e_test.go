@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -117,7 +118,14 @@ func TestE2E(t *testing.T) {
 	forgeHome := t.TempDir()
 	cfgPath := writeForgeConfig(t, runID, ip, privKeyPath, chartVersion)
 
-	// 5. forge apply (k3s + platform chart via helm). Retried because the k3s
+	// 4b. stand up a file:// overlay repo on the host with the MetalLB L2 edge
+	//     values (pool = the droplet's public IP). forge apply clones it (file://)
+	//     and feeds values.yaml to the chart. The chart defaults (TLS-on, host
+	//     gateway.iterabase.local, self-signed) + the overlay's metallb pool bring
+	//     up the public HTTPS edge. Mirrors the overlay deployment path OPO1 uses.
+	writeEdgeOverlayOnHost(t, ip, privKeyPath)
+
+	// 5. forge apply (k3s + platform chart + overlay via helm). Retried because the k3s
 	//    install script's binary download from GitHub releases is prone to
 	//    transient DO egress failures; `apply` is idempotent (re-reads live
 	//    state and reconciles) so re-running is safe. Only non-zero exits are
@@ -129,13 +137,17 @@ func TestE2E(t *testing.T) {
 	if !strings.Contains(out, "chart applied: true") {
 		t.Fatalf("apply did not report chart applied:\n%s", out)
 	}
+	if !strings.Contains(out, "overlay applied: true") {
+		t.Fatalf("apply did not report overlay applied:\n%s", out)
+	}
 	t.Logf("apply output:\n%s", out)
 
 	// 6. node label + Ready + dual-stack pod CIDRs via the off-host kubeconfig (client-go)
 	kcPath := filepath.Join(forgeHome, runID, "kubeconfig.yaml")
 	checkNodeViaKubeconfig(t, kcPath, runID)
 
-	// 7. gateway pod Running + /health 200 through ingress (hostNetwork on the VM IP)
+	// 7. gateway pod Running + /health 200 over the real HTTPS edge (LoadBalancer
+	//    + MetalLB + cert-manager self-signed TLS), not a hostNetwork HTTP curl.
 	checkGatewayRunning(t, kcPath)
 	checkGatewayHealth(t, ip)
 }
@@ -171,7 +183,7 @@ func generateKey(t *testing.T) (pubKeyStr, privKeyPath string) {
 
 func cloudInit(pubKeyStr string) string {
 	return fmt.Sprintf(`#cloud-config
-packages: [curl]
+packages: [curl, git]
 users:
   - name: forge
     sudo: ALL=(ALL) NOPASSWD:ALL
@@ -340,6 +352,9 @@ spec:
     disable: [traefik, servicelb]
   chart:
     version: %s
+  overlay:
+    repo: file:///tmp/edge-overlay
+    ref: master
 `, name, ip, keyPath, name, chartVersion)
 	p := filepath.Join(t.TempDir(), "forge.yaml")
 	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
@@ -464,9 +479,20 @@ func checkGatewayRunning(t *testing.T, kcPath string) {
 
 func checkGatewayHealth(t *testing.T, ip string) {
 	t.Helper()
-	url := fmt.Sprintf("http://%s/health", ip)
-	client := &http.Client{Timeout: 10 * time.Second}
-	deadline := time.Now().Add(90 * time.Second)
+	// Reach the gateway over the real HTTPS edge: Host + SNI = gateway.iterabase.local
+	// (the chart default), pinned to the droplet IP - the MetalLB-assigned LoadBalancer
+	// IP on this single-node cluster (kube-proxy DNATs <ip>:443 to ingress-nginx).
+	// InsecureSkipVerify: the edge uses the self-signed issuer (kind/E2E).
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // self-signed e2e cert
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, net.JoinHostPort(ip, "443"))
+		},
+	}
+	client := &http.Client{Timeout: 10 * time.Second, Transport: transport}
+	url := "https://gateway.iterabase.local/health"
+	deadline := time.Now().Add(180 * time.Second) // MetalLB LB-IP + cert issuance + ingress sync
 	for time.Now().Before(deadline) {
 		resp, err := client.Get(url)
 		if err == nil {
@@ -477,5 +503,47 @@ func checkGatewayHealth(t *testing.T, ip string) {
 		}
 		time.Sleep(3 * time.Second)
 	}
-	t.Fatalf("gateway /health not 200 via %s", url)
+	t.Fatalf("gateway /health not 200 via %s (ip %s)", url, ip)
+}
+
+// writeEdgeOverlayOnHost creates a file:// overlay git repo on the droplet with
+// the MetalLB L2 edge values (IPAddressPool = the droplet's public IP). forge
+// apply clones it (file://, tokenless) and feeds values.yaml to the platform
+// chart. git is pre-installed by cloud-init. The scaffold matches what forge
+// validates: values.yaml + values.client.yaml + crds/client/kustomization.yaml.
+func writeEdgeOverlayOnHost(t *testing.T, ip, keyPath string) {
+	t.Helper()
+	sc, err := sshDial(ip, keyPath)
+	if err != nil {
+		t.Fatalf("ssh dial %s: %v", ip, err)
+	}
+	defer sc.Close()
+	script := fmt.Sprintf(`set -e
+d=/tmp/edge-overlay
+rm -rf "$d"
+mkdir -p "$d/crds/client"
+cat > "$d/values.yaml" <<'YAML'
+metallb:
+  enabled: true
+metallb-config:
+  enabled: true
+  addresses:
+    - %s-%s
+YAML
+cat > "$d/values.client.yaml" <<'YAML'
+# client-specific overrides (none for e2e)
+YAML
+cat > "$d/crds/client/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: []
+YAML
+cd "$d"
+git init -q -b master
+git add .
+git -c user.email=forge@e2e -c user.name=forge commit -qm init
+`, ip, ip)
+	if out, err := sshOutput(sc, script); err != nil {
+		t.Fatalf("write edge overlay on host: %v\n%s", err, out)
+	}
 }
