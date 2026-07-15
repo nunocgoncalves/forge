@@ -7,6 +7,7 @@
 - Branch names, commit messages, and pull request titles must include the Linear ticket identifier, for example `HOR-123-short-description`, `HOR-123 describe change`, and `HOR-123 — Describe change`.
 - Commit to the ticket branch as work progresses and as commits make sense.
 - When work is ready for review, open a pull request; do not merge it yourself.
+- After pushing a branch or opening a PR, watch the CI/CD workflows to completion (`gh run watch <run-id>` or the Actions tab) and stay in the iteration loop: if a workflow fails, triage and push a fix promptly. The work is not handed off until CI is green or the failure is understood.
 - Pull request descriptions must be valid Markdown with real line breaks, not escaped `\n` text; when using `gh`, write the body to a file and use `--body-file` for both create/edit operations.
 - Pull request descriptions should use this structure: `## Summary`, `## Validation`, `## Production impact`, and `## Ticket state`; include concise bullets under each heading and mark non-applicable sections as `None` or `N/A`.
 - Only the user may approve and merge pull requests to `master`.

@@ -135,6 +135,7 @@ EOF
 cat > %[1]s/crds/client/kustomization.yaml <<'EOF'
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+resources: []
 EOF
 cat > %[1]s/secrets.yaml <<'EOF'
 secrets:
