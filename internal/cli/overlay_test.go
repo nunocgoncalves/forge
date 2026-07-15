@@ -9,15 +9,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type fakePrompter struct {
-	token []byte
-	err   error
-	calls int
+type fakePasswordPrompter struct {
+	value    []byte
+	err      error
+	calls    int
+	gotLabel string
 }
 
-func (f *fakePrompter) Prompt() ([]byte, error) {
+func (f *fakePasswordPrompter) Prompt(label string) ([]byte, error) {
 	f.calls++
-	return f.token, f.err
+	f.gotLabel = label
+	return f.value, f.err
 }
 
 type fakeScopeChecker struct {
@@ -36,7 +38,7 @@ func (f *fakeScopeChecker) Check(_ context.Context, token []byte, repo string) e
 
 func TestResolveOverlayToken_EnvVar(t *testing.T) {
 	sc := &fakeScopeChecker{}
-	tok, err := resolveOverlayToken(context.Background(), "https://github.com/example/overlay.git", "ghp_env", true, &fakePrompter{}, sc)
+	tok, err := resolveOverlayToken(context.Background(), "https://github.com/example/overlay.git", "ghp_env", true, &fakePasswordPrompter{}, sc)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("ghp_env"), tok)
 	assert.Equal(t, 1, sc.calls, "scope checked for env token")
@@ -51,7 +53,7 @@ func TestResolveOverlayToken_EnvVarScopeError(t *testing.T) {
 
 func TestResolveOverlayToken_PromptInteractive(t *testing.T) {
 	sc := &fakeScopeChecker{}
-	tp := &fakePrompter{token: []byte("ghp_prompt")}
+	tp := &fakePasswordPrompter{value: []byte("ghp_prompt")}
 	tok, err := resolveOverlayToken(context.Background(), "https://github.com/example/overlay.git", "", true, tp, sc)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("ghp_prompt"), tok)
@@ -61,7 +63,7 @@ func TestResolveOverlayToken_PromptInteractive(t *testing.T) {
 
 func TestResolveOverlayToken_PromptEmptyIsPublic(t *testing.T) {
 	sc := &fakeScopeChecker{}
-	tp := &fakePrompter{token: nil} // empty prompt => public
+	tp := &fakePasswordPrompter{value: nil} // empty prompt => public
 	tok, err := resolveOverlayToken(context.Background(), "https://github.com/example/overlay.git", "", true, tp, sc)
 	require.NoError(t, err)
 	assert.Nil(t, tok, "empty prompt => tokenless (public repo)")
@@ -71,7 +73,7 @@ func TestResolveOverlayToken_PromptEmptyIsPublic(t *testing.T) {
 
 func TestResolveOverlayToken_NoPromptInCI(t *testing.T) {
 	sc := &fakeScopeChecker{}
-	tp := &fakePrompter{token: []byte("should-not-prompt")}
+	tp := &fakePasswordPrompter{value: []byte("should-not-prompt")}
 	tok, err := resolveOverlayToken(context.Background(), "https://github.com/example/overlay.git", "", false, tp, sc) // non-interactive
 	require.NoError(t, err)
 	assert.Nil(t, tok, "CI proceeds tokenless")
@@ -81,7 +83,7 @@ func TestResolveOverlayToken_NoPromptInCI(t *testing.T) {
 
 func TestResolveOverlayToken_FileURLNoToken(t *testing.T) {
 	sc := &fakeScopeChecker{}
-	tp := &fakePrompter{token: []byte("x")}
+	tp := &fakePasswordPrompter{value: []byte("x")}
 	tok, err := resolveOverlayToken(context.Background(), "file:///tmp/overlay", "", true, tp, sc)
 	require.NoError(t, err)
 	assert.Nil(t, tok, "file:// needs no token")

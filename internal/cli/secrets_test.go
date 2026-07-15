@@ -10,19 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type fakeSecretPrompter struct {
-	value    []byte
-	err      error
-	calls    int
-	gotLabel string
-}
-
-func (f *fakeSecretPrompter) Prompt(label string) ([]byte, error) {
-	f.calls++
-	f.gotLabel = label
-	return f.value, f.err
-}
-
 // ensureEnvUnset removes envVar for the test (so os.LookupEnv ok=false), restoring it after.
 func ensureEnvUnset(t *testing.T, envVar string) {
 	t.Helper()
@@ -35,7 +22,7 @@ func ensureEnvUnset(t *testing.T, envVar string) {
 func TestResolveSecretValue_EnvVar(t *testing.T) {
 	t.Setenv("FORGE_TEST_SECRET", "envval")
 	var buf bytes.Buffer
-	tp := &fakeSecretPrompter{value: []byte("should-not-prompt")}
+	tp := &fakePasswordPrompter{value: []byte("should-not-prompt")}
 	v, err := resolveSecretValue("cloudflare-api-token", "FORGE_TEST_SECRET", true, tp, &buf)
 	require.NoError(t, err)
 	assert.Equal(t, "envval", v)
@@ -47,18 +34,19 @@ func TestResolveSecretValue_EnvVar(t *testing.T) {
 func TestResolveSecretValue_PromptInteractive(t *testing.T) {
 	ensureEnvUnset(t, "FORGE_TEST_SECRET")
 	var buf bytes.Buffer
-	tp := &fakeSecretPrompter{value: []byte("prompted-val")}
+	tp := &fakePasswordPrompter{value: []byte("prompted-val")}
 	v, err := resolveSecretValue("cloudflare-api-token", "FORGE_TEST_SECRET", true, tp, &buf)
 	require.NoError(t, err)
 	assert.Equal(t, "prompted-val", v)
 	assert.Equal(t, 1, tp.calls, "no env var + interactive ⇒ prompt")
+	assert.Contains(t, tp.gotLabel, "cloudflare-api-token", "prompt label names the secret")
 	assert.Empty(t, buf.String(), "no env-detection log when prompting")
 }
 
 func TestResolveSecretValue_NoPromptInCI(t *testing.T) {
 	ensureEnvUnset(t, "FORGE_TEST_SECRET")
 	var buf bytes.Buffer
-	tp := &fakeSecretPrompter{value: []byte("should-not-prompt")}
+	tp := &fakePasswordPrompter{value: []byte("should-not-prompt")}
 	_, err := resolveSecretValue("cloudflare-api-token", "FORGE_TEST_SECRET", false, tp, &buf) // non-interactive
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unset")
@@ -69,7 +57,7 @@ func TestResolveSecretValue_NoPromptInCI(t *testing.T) {
 func TestCliSecretResolver_Delegates(t *testing.T) {
 	t.Setenv("FORGE_TEST_SECRET", "envval")
 	var buf bytes.Buffer
-	r := cliSecretResolver{interactive: true, prompter: termSecretPrompter{}, out: &buf}
+	r := cliSecretResolver{interactive: true, prompter: termPasswordPrompter{}, out: &buf}
 	v, err := r.Resolve(context.Background(), "cloudflare-api-token", "FORGE_TEST_SECRET")
 	require.NoError(t, err)
 	assert.Equal(t, "envval", v)
