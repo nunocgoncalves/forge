@@ -7,27 +7,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"syscall"
 	"time"
-
-	"golang.org/x/term"
 )
-
-// TokenPrompter reads an overlay git token with echo off. The real impl reads
-// from the terminal; tests use a fake.
-type TokenPrompter interface {
-	Prompt() ([]byte, error)
-}
-
-// termPrompter reads a token from stdin with echo off (golang.org/x/term).
-type termPrompter struct{}
-
-func (termPrompter) Prompt() ([]byte, error) {
-	fmt.Fprint(os.Stderr, "Overlay repo token (non-echo; enter for a public repo): ")
-	b, err := term.ReadPassword(int(syscall.Stdin))
-	fmt.Fprintln(os.Stderr)
-	return b, err
-}
 
 // ScopeChecker validates an overlay git token has access to the repo's host
 // (GitHub PAT scope check). The real impl calls the GitHub API; tests use a fake.
@@ -75,7 +56,7 @@ func (g githubScopeChecker) Check(ctx context.Context, token []byte, repo string
 //     empty => public repo, tokenless). A prompted token's scopes are checked.
 //   - file:// repos, or https with no env var + non-interactive (CI), need no
 //     token (public/CI proceeds tokenless).
-func resolveOverlayToken(ctx context.Context, repo, envToken string, interactive bool, tp TokenPrompter, sc ScopeChecker) ([]byte, error) {
+func resolveOverlayToken(ctx context.Context, repo, envToken string, interactive bool, tp passwordPrompter, sc ScopeChecker) ([]byte, error) {
 	if envToken != "" {
 		tok := []byte(envToken)
 		if err := sc.Check(ctx, tok, repo); err != nil {
@@ -89,7 +70,7 @@ func resolveOverlayToken(ctx context.Context, repo, envToken string, interactive
 	if !interactive || tp == nil {
 		return nil, nil // CI / non-interactive proceeds tokenless
 	}
-	tok, err := tp.Prompt()
+	tok, err := tp.Prompt("Overlay repo token (enter for a public repo)")
 	if err != nil {
 		return nil, fmt.Errorf("read overlay token: %w", err)
 	}
@@ -100,14 +81,6 @@ func resolveOverlayToken(ctx context.Context, repo, envToken string, interactive
 		return nil, err
 	}
 	return tok, nil
-}
-
-// isTTY reports whether stdin is a terminal (gates the interactive token
-// prompt). Uses term.IsTerminal so /dev/null — a CharDevice but not a terminal,
-// e.g. a subprocess's default stdin in CI — is correctly treated as
-// non-interactive (no prompt, proceeds tokenless).
-func isTTY() bool {
-	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // newGithubScopeChecker builds the production GitHub scope checker.
