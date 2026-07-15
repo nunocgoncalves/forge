@@ -33,6 +33,28 @@ type secretsFile struct {
 	Secrets []SecretSync `yaml:"secrets"`
 }
 
+// SecretResolver resolves a declared secret's value. The CLI provides the
+// terminal implementation (env var wins + is logged; otherwise prompt on TTY;
+// otherwise error); tests inject fakes. Mirrors the overlay git-token
+// resolution, adapted for declarations discovered at apply time from the
+// overlay's secrets.yaml.
+type SecretResolver interface {
+	Resolve(ctx context.Context, name, envVar string) (string, error)
+}
+
+// envOnlySecretResolver is the fallback when no resolver is wired: env var only,
+// error if unset. Used when applySecrets runs without a CLI resolver (e.g. tests
+// that don't exercise the prompt path).
+type envOnlySecretResolver struct{}
+
+func (envOnlySecretResolver) Resolve(_ context.Context, name, envVar string) (string, error) {
+	v, ok := os.LookupEnv(envVar)
+	if !ok {
+		return "", fmt.Errorf("secret %q: env var %q is unset (set it in the operator's gitignored .env)", name, envVar)
+	}
+	return v, nil
+}
+
 // applySecrets is the secret-sync phase: it reads the overlay's secrets.yaml
 // (non-secret declarations) from the cloned overlay on the host, resolves each
 // env var on the operator, and materializes the Secrets via `kubectl apply -f -`
@@ -70,8 +92,12 @@ func applySecrets(ctx context.Context, o overlayer.Overlayer, d deployer.Deploye
 	if err := ensureSecretNamespaces(ctx, d, secs); err != nil {
 		return err
 	}
+	resolver := opts.SecretResolver
+	if resolver == nil {
+		resolver = envOnlySecretResolver{}
+	}
 	for _, s := range secs {
-		if err := materializeSecret(ctx, d, s); err != nil {
+		if err := materializeSecret(ctx, d, s, resolver); err != nil {
 			return err
 		}
 	}
@@ -99,15 +125,15 @@ func ensureSecretNamespaces(ctx context.Context, d deployer.Deployer, secs []Sec
 	return nil
 }
 
-// materializeSecret validates a declaration, resolves its env var, and applies
-// the Secret manifest via stdin.
-func materializeSecret(ctx context.Context, d deployer.Deployer, s SecretSync) error {
+// materializeSecret validates a declaration, resolves its value via the
+// resolver, and applies the Secret manifest via stdin.
+func materializeSecret(ctx context.Context, d deployer.Deployer, s SecretSync, r SecretResolver) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
-	val, ok := os.LookupEnv(s.EnvVar)
-	if !ok {
-		return fmt.Errorf("secret %q: env var %q is unset (set it in the operator's gitignored .env)", s.Name, s.EnvVar)
+	val, err := r.Resolve(ctx, s.Name, s.EnvVar)
+	if err != nil {
+		return err
 	}
 	if err := d.ApplyManifest(ctx, secretManifestJSON(s, val)); err != nil {
 		return fmt.Errorf("secret %q: %w", s.Name, err)

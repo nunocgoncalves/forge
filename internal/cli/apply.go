@@ -88,7 +88,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	}
 
 	log.Info("applying", "install", cfg.Metadata.Name)
-	res, err := lifecycle.Apply(ctx, cfg, p, p, p, lifecycle.ApplyOpts{KubeconfigOut: kcOut, SkipChart: skipChart, SkipGPU: skipGPU, SkipOverlay: skipOverlay, SkipSecrets: skipSecrets, OverlayToken: overlayToken})
+	res, err := lifecycle.Apply(ctx, cfg, p, p, p, lifecycle.ApplyOpts{KubeconfigOut: kcOut, SkipChart: skipChart, SkipGPU: skipGPU, SkipOverlay: skipOverlay, SkipSecrets: skipSecrets, OverlayToken: overlayToken, SecretResolver: cliSecretResolver{interactive: isTTY(), prompter: termSecretPrompter{}, out: os.Stderr}})
 	if err != nil {
 		return err
 	}
