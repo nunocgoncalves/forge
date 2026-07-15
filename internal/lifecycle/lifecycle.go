@@ -77,15 +77,16 @@ type Result struct {
 type ApplyOpts struct {
 	KubeconfigOut    string
 	DryRun           bool
-	ReadyTimeout     time.Duration // default 120s
-	ReadyInterval    time.Duration // default 2s
-	SkipChart        bool          // skip the platform chart phase (k3s-only)
-	SkipGPU          bool          // skip the GPU readiness phase
-	SkipOverlay      bool          // skip the overlay phase (clone + chart values + CRD instances)
-	SkipSecrets      bool          // skip the secret-sync phase (materialize declared Secrets)
-	GPUReadyTimeout  time.Duration // default 15m (driver compile is slow on first boot)
-	GPUReadyInterval time.Duration // default 5s
-	OverlayToken     []byte        // https git token for a private overlay repo (nil => public/file://)
+	ReadyTimeout     time.Duration  // default 120s
+	ReadyInterval    time.Duration  // default 2s
+	SkipChart        bool           // skip the platform chart phase (k3s-only)
+	SkipGPU          bool           // skip the GPU readiness phase
+	SkipOverlay      bool           // skip the overlay phase (clone + chart values + CRD instances)
+	SkipSecrets      bool           // skip the secret-sync phase (materialize declared Secrets)
+	SecretResolver   SecretResolver // resolves declared secret values (env-or-prompt); nil => env-only fallback
+	GPUReadyTimeout  time.Duration  // default 15m (driver compile is slow on first boot)
+	GPUReadyInterval time.Duration  // default 5s
+	OverlayToken     []byte         // https git token for a private overlay repo (nil => public/file://)
 }
 
 // withDefaults fills zero-valued timeouts/intervals with their defaults.

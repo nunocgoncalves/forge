@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -648,6 +649,22 @@ func TestDestroy_Overlay(t *testing.T) {
 	assert.Equal(t, "/var/lib/forge/overlay/opo1", o.removeCalls[0])
 }
 
+type fakeSecretResolver struct {
+	value string
+	unset bool
+	calls []resolveCall
+}
+
+type resolveCall struct{ name, envVar string }
+
+func (f *fakeSecretResolver) Resolve(_ context.Context, name, envVar string) (string, error) {
+	f.calls = append(f.calls, resolveCall{name, envVar})
+	if f.unset {
+		return "", fmt.Errorf("secret %q: env var %q is unset (set it in the operator's gitignored .env)", name, envVar)
+	}
+	return f.value, nil
+}
+
 func testConfigWithOverlay() *config.Cluster {
 	c := testConfigWithChart()
 	c.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
@@ -666,15 +683,20 @@ func overlaySecretsYAML() string {
 
 func TestApply_Secrets(t *testing.T) {
 	useTempHome(t)
-	t.Setenv("FORGE_CLOUDFLARE_API_TOKEN", "supersecret-token")
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
 	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileContent: overlaySecretsYAML()}
+	r := &fakeSecretResolver{value: "supersecret-token"}
 	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, ApplyOpts{
-		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond, SecretResolver: r,
 	})
 	require.NoError(t, err)
 	assert.True(t, res.SecretsApplied)
+
+	// the resolver was called for the declared secret (env-or-prompt happens there).
+	require.Len(t, r.calls, 1)
+	assert.Equal(t, "cloudflare-api-token", r.calls[0].name)
+	assert.Equal(t, "FORGE_CLOUDFLARE_API_TOKEN", r.calls[0].envVar)
 
 	// namespace pre-create, then the secret manifest (stringData), via stdin.
 	require.Len(t, d.applyManifestCalls, 2)
@@ -714,28 +736,22 @@ func TestApply_Secrets(t *testing.T) {
 
 func TestApply_Secrets_UnsetEnv(t *testing.T) {
 	useTempHome(t)
-	// Force the env var to be absent (LookupEnv ok=false), regardless of the
-	// operator's environment, restoring it after the test.
-	if old, ok := os.LookupEnv("FORGE_CLOUDFLARE_API_TOKEN"); ok {
-		os.Unsetenv("FORGE_CLOUDFLARE_API_TOKEN")
-		t.Cleanup(func() { os.Setenv("FORGE_CLOUDFLARE_API_TOKEN", old) })
-	}
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
 	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileContent: overlaySecretsYAML()}
+	r := &fakeSecretResolver{unset: true} // resolver can't provide a value (env unset + non-interactive)
 	_, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, ApplyOpts{
-		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond, SecretResolver: r,
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "FORGE_CLOUDFLARE_API_TOKEN")
 	assert.Contains(t, err.Error(), "unset")
-	assert.Empty(t, d.applyCalls, "chart not applied when a secret env var is missing")
-	assert.Len(t, d.applyManifestCalls, 1, "namespace pre-created before the env check fails")
+	assert.Empty(t, d.applyCalls, "chart not applied when a secret value is missing")
+	assert.Len(t, d.applyManifestCalls, 1, "namespace pre-created before the resolve fails")
 }
 
 func TestApply_SkipSecrets(t *testing.T) {
 	useTempHome(t)
-	t.Setenv("FORGE_CLOUDFLARE_API_TOKEN", "supersecret-token")
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
 	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileContent: overlaySecretsYAML()}
@@ -764,7 +780,6 @@ func TestApply_Secrets_NoSecretsFile(t *testing.T) {
 
 func TestApply_Secrets_NoOverlay(t *testing.T) {
 	useTempHome(t)
-	t.Setenv("FORGE_CLOUDFLARE_API_TOKEN", "supersecret-token")
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
 	o := &fakeOverlayer{} // no overlay.repo ⇒ no clone
