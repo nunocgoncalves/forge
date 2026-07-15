@@ -32,7 +32,7 @@ import (
 
 const (
 	region  = "fra1"
-	size    = "s-1vcpu-2gb"
+	size    = "s-2vcpu-4gb" // full stack + MetalLB needs headroom; s-1vcpu-2gb timed out on helm --wait
 	image   = "ubuntu-24-04-x64"
 	k3sPort = 6443
 )
@@ -103,6 +103,25 @@ func TestE2E(t *testing.T) {
 			return
 		}
 		deleteDroplet(ctx, client, droplet.ID)
+	}()
+
+	// On any failure, dump pods + events (via SSH + the on-host k3s kubeconfig)
+	// before the droplet is destroyed - helm's --wait timeout error is terse, so
+	// this shows which pod was pending/crashlooping.
+	defer func() {
+		if !t.Failed() {
+			return
+		}
+		sc, err := sshDial(ip, privKeyPath)
+		if err != nil {
+			t.Logf("debug pod dump: ssh dial %s failed: %v", ip, err)
+			return
+		}
+		defer sc.Close()
+		out, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get pods -A 2>&1")
+		t.Logf("debug pod dump (on failure):\n%s", out)
+		ev, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get events -A --sort-by=.lastTimestamp 2>&1 | tail -30")
+		t.Logf("debug events (tail):\n%s", ev)
 	}()
 
 	// 3. build forge binary from the repo root
