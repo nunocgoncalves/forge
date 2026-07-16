@@ -124,12 +124,12 @@ func printApplyResult(out io.Writer, cfg *config.Cluster, res *lifecycle.Result)
 		fmt.Fprintf(out, "  secrets applied: true\n")
 	}
 	if cfg.Spec.Flux.Enabled {
-		fmt.Fprintf(out, "  flux:             %s\n", cfg.Spec.Flux.Version)
-		fmt.Fprintf(out, "  flux installed:   %v\n", res.FluxInstalled)
+		fmt.Fprintf(out, "  flux: %s\n", cfg.Spec.Flux.Version)
+		fmt.Fprintf(out, "  flux installed: %v\n", res.FluxInstalled)
 		if res.GitRepositoryStatus != "" {
-			fmt.Fprintf(out, "  gitrepository:    %s\n", res.GitRepositoryStatus)
+			fmt.Fprintf(out, "  gitrepository: %s\n", res.GitRepositoryStatus)
 		} else {
-			fmt.Fprintf(out, "  gitrepository:    (not ready yet — Flux reconciles async)\n")
+			fmt.Fprintf(out, "  gitrepository: (not ready yet — Flux reconciles async)\n")
 		}
 	}
 }
