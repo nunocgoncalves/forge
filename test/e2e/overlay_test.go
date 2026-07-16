@@ -20,6 +20,11 @@ import (
 // empty + values are comment-only, so this validates the MECHANICS on a real
 // host (clone → helm -f → kubectl apply -k) rather than a specific instance.
 //
+// It points at ref `e2e` (a minimal-scaffold test-fixture branch): `master` holds
+// the HOR-299 bare-metal prod recipe (required placeholders, not deployable bare
+// on a cloud VM). The prod recipe's deployability is HOR-299's job; this test is
+// forge's mechanics. See iterabase-overlay `e2e` branch.
+//
 // FORGE_OVERLAY_TOKEN is intentionally unset (public repo, CI non-interactive);
 // the token-prompt path is covered by unit + fake-SSH tests.
 func TestE2EOverlay(t *testing.T) {
@@ -126,7 +131,7 @@ spec:
     version: %s
   overlay:
     repo: https://github.com/nunocgoncalves/iterabase-overlay.git
-    ref: master
+    ref: e2e
 `, name, ip, keyPath, name, chartVersion)
 	p := filepath.Join(t.TempDir(), "forge.yaml")
 	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
