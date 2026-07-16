@@ -808,3 +808,150 @@ func TestOverlayer_ReadFile(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+func TestFluxer_EnsureFlux_InstallsCLI(t *testing.T) {
+	var gotInstall, gotFluxInstall string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v flux":
+			return "", 1 // absent
+		case strings.Contains(cmd, "fluxcd.io/install.sh"):
+			gotInstall = cmd
+			return "", 0
+		case strings.Contains(cmd, "flux") && strings.Contains(cmd, "install") && strings.Contains(cmd, "--version="):
+			gotFluxInstall = cmd
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.EnsureFlux(context.Background(), "v2.4.0"))
+	// CLI install script is version-pinned via FLUX_VERSION; the version never
+	// appears bare in a way that could mismatch a tag filter.
+	assert.Contains(t, gotInstall, "fluxcd.io/install.sh")
+	assert.Contains(t, gotInstall, "FLUX_VERSION='v2.4.0'")
+	// flux install runs against the k3s kubeconfig via KUBECONFIG env (sudo root
+	// reads the root-owned 0600 kubeconfig); version pinned.
+	assert.Contains(t, gotFluxInstall, "KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
+	assert.Contains(t, gotFluxInstall, "--version=v2.4.0")
+}
+
+func TestFluxer_EnsureFlux_CLIPresent(t *testing.T) {
+	var gotFluxInstall string
+	sawInstallScript := false
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v flux":
+			return "/usr/local/bin/flux\n", 0 // present
+		case strings.Contains(cmd, "fluxcd.io/install.sh"):
+			sawInstallScript = true
+			return "", 0
+		case strings.Contains(cmd, "flux") && strings.Contains(cmd, "install") && strings.Contains(cmd, "--version="):
+			gotFluxInstall = cmd
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.EnsureFlux(context.Background(), "v2.4.0"))
+	assert.False(t, sawInstallScript, "CLI already present => install script skipped")
+	assert.Contains(t, gotFluxInstall, "--version=v2.4.0")
+}
+
+func TestFluxer_EnsureFlux_InstallFails(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v flux":
+			return "", 1
+		case strings.Contains(cmd, "fluxcd.io/install.sh"):
+			return "", 0
+		case strings.Contains(cmd, "flux") && strings.Contains(cmd, "install"):
+			return "", 1 // flux install fails
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	err := p.EnsureFlux(context.Background(), "v2.4.0")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "flux install")
+}
+
+func TestFluxer_UninstallFlux(t *testing.T) {
+	var got string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v flux":
+			return "/usr/local/bin/flux\n", 0
+		case strings.Contains(cmd, "flux") && strings.Contains(cmd, "uninstall"):
+			got = cmd
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.UninstallFlux(context.Background()))
+	assert.Contains(t, got, "uninstall")
+	assert.Contains(t, got, "--silent") // non-interactive
+	assert.Contains(t, got, "KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
+}
+
+func TestFluxer_UninstallFlux_FluxAbsent(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		if cmd == "command -v flux" {
+			return "", 1 // CLI absent
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	// No flux CLI => nothing to remove, not an error (destroy proceeds to k3s).
+	require.NoError(t, p.UninstallFlux(context.Background()))
+}
+
+func TestFluxer_GitRepositoryStatus(t *testing.T) {
+	var got string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case strings.Contains(cmd, "gitrepository"):
+			got = cmd
+			return "True\n", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	status, err := p.GitRepositoryStatus(context.Background(), "overlay")
+	require.NoError(t, err)
+	assert.Equal(t, "True", status)
+	assert.Contains(t, got, "gitrepository")
+	assert.Contains(t, got, "flux-system")
+	assert.Contains(t, got, "overlay")
+}
+
+func TestFluxer_GitRepositoryStatus_NotPresent(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		// kubectl errors (CR not present yet) => tolerated as empty.
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	status, err := p.GitRepositoryStatus(context.Background(), "overlay")
+	require.NoError(t, err, "a missing/not-ready GitRepository is tolerated, not an error")
+	assert.Empty(t, status)
+}
