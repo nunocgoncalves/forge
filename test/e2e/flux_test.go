@@ -74,7 +74,11 @@ func TestE2EFlux(t *testing.T) {
 
 	// FORGE_OVERLAY_TOKEN unset => forge proceeds tokenless (public repo); the
 	// GitRepository has no secretRef (Flux clones anonymously).
-	out := applyWithRetry(t, forgeBin, forgeHome, cfgPath)
+	// --skip-chart isolates the Flux phase: the platform chart deploy (exercised
+	// by e2e-overlay) is orthogonal to Flux, and the public base overlay's
+	// minimal values aren't a full deploy recipe (HOR-299). flux install + the
+	// GitRepository/Kustomization don't depend on the platform chart.
+	out := applyWithRetryArgs(t, forgeBin, forgeHome, cfgPath, "--skip-chart")
 	if !strings.Contains(out, "node ready: true") {
 		t.Fatalf("apply did not report node ready:\n%s", out)
 	}

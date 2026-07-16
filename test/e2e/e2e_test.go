@@ -389,7 +389,34 @@ func runForgeE(bin, forgeHome string, args ...string) (string, error) {
 	return string(out), err
 }
 
-// applyWithRetry runs `forge apply` with bounded retries on non-zero exit. The
+// applyWithRetryArgs is applyWithRetry with extra forge apply args appended
+// (e.g. --skip-chart to isolate a phase that doesn't depend on the platform
+// chart). Bounded retries on non-zero exit.
+func applyWithRetryArgs(t *testing.T, bin, forgeHome, cfgPath string, extraArgs ...string) string {
+	t.Helper()
+	const maxAttempts = 3
+	var out string
+	var lastErr error
+	args := append([]string{"apply", "--config", cfgPath}, extraArgs...)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		var err error
+		out, err = runForgeE(bin, forgeHome, args...)
+		if err == nil {
+			if attempt > 1 {
+				t.Logf("apply succeeded on attempt %d/%d", attempt, maxAttempts)
+			}
+			return out
+		}
+		lastErr = err
+		t.Logf("apply attempt %d/%d failed: %v\n%s", attempt, maxAttempts, err, out)
+		if attempt < maxAttempts {
+			time.Sleep(10 * time.Second)
+		}
+	}
+	t.Fatalf("forge apply failed after %d attempts: %v\n%s", maxAttempts, lastErr, out)
+	return out
+}
+
 // k3s install script's binary download from GitHub releases is prone to
 // transient DO egress failures; `apply` is idempotent (re-reads live state and
 // reconciles), so re-running after a partial/failed install is safe. A 0-exit
