@@ -1,0 +1,40 @@
+name: e2e-flux
+
+on:
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "go.mod"
+      - "go.sum"
+      - "test/e2e/**"
+      - ".github/workflows/e2e-flux.yml"
+  workflow_dispatch:
+
+# Serialize with the other DO e2e suites (one droplet at a time per suite);
+# never cancel a running run so its droplet is always torn down rather than
+# orphaned.
+concurrency:
+  group: e2e-flux
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  flux-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+
+      - name: flux e2e
+        run: make test-e2e-flux
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          # Authenticates the GitHub releases API call that auto-resolves the
+          # chart version (raises the rate limit from 60 to 5000 req/hour).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

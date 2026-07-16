@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-overlay test-e2e-secrets test-e2e-cert-issuers test-e2e-controlplane test-e2e-gpu test-e2e-inference test-e2e-inference-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
+.PHONY: build test test-unit test-e2e test-e2e-overlay test-e2e-secrets test-e2e-flux test-e2e-cert-issuers test-e2e-controlplane test-e2e-gpu test-e2e-inference test-e2e-inference-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
 
 # Load .env if present (e.g. DIGITALOCEAN_TOKEN for e2e). .env is gitignored.
 -include .env
@@ -31,6 +31,9 @@ test-e2e-overlay:
 
 test-e2e-secrets:
 	cd test/e2e && go test -race -count=1 -timeout 25m -run '^TestE2ESecrets$$' .
+
+test-e2e-flux:
+	cd test/e2e && go test -race -count=1 -timeout 30m -run '^TestE2EFlux$$' .
 
 test-e2e-cert-issuers:
 	cd test/e2e && go test -race -count=1 -timeout 15m -run '^TestCertIssuers$$' .
