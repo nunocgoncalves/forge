@@ -45,7 +45,7 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	defer p.Close()
 
 	ctx := context.Background()
-	if err := lifecycle.Destroy(ctx, cfg, p, p, p); err != nil {
+	if err := lifecycle.Destroy(ctx, cfg, p, p, p, p); err != nil {
 		return err
 	}
 	if dir, err := artifacts.Dir(cfg.Metadata.Name); err == nil {

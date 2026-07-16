@@ -12,6 +12,7 @@ import (
 	"github.com/nunocgoncalves/forge/internal/artifacts"
 	"github.com/nunocgoncalves/forge/internal/config"
 	"github.com/nunocgoncalves/forge/internal/deployer"
+	"github.com/nunocgoncalves/forge/internal/fluxer"
 	"github.com/nunocgoncalves/forge/internal/k3s"
 	"github.com/nunocgoncalves/forge/internal/kubeconfig"
 	"github.com/nunocgoncalves/forge/internal/overlayer"
@@ -58,19 +59,23 @@ type ReconcilePlan struct {
 	GPUOperatorVersion string // nvidia/gpu-operator chart version to install (empty => GPU disabled)
 	OverlayRepo        string // overlay.repo (empty => overlay phase skipped)
 	OverlayRef         string // overlay.ref (branch or tag)
+	FluxEnabled        bool   // flux.enabled; the Flux GitOps phase will run
+	FluxVersion        string // flux2 release tag to install (empty => Flux disabled)
 }
 
 // Result is the outcome of a mutating apply.
 type Result struct {
-	Plan               *ReconcilePlan
-	KubeconfigPath     string
-	NodeReady          bool
-	ChartApplied       bool
-	GPUOperatorApplied bool   // nvidia/gpu-operator release installed/upgraded
-	GPUReady           bool   // ClusterPolicy reached state=ready (the GPU readiness gate)
-	OverlayApplied     bool   // overlay cloned + chart applied with overlay values + CRD instances applied
-	OverlayCommit      string // resolved overlay commit SHA
-	SecretsApplied     bool   // declared Secrets materialized from operator env vars
+	Plan                *ReconcilePlan
+	KubeconfigPath      string
+	NodeReady           bool
+	ChartApplied        bool
+	GPUOperatorApplied  bool   // nvidia/gpu-operator release installed/upgraded
+	GPUReady            bool   // ClusterPolicy reached state=ready (the GPU readiness gate)
+	OverlayApplied      bool   // overlay cloned + chart applied with overlay values + CRD instances applied
+	OverlayCommit       string // resolved overlay commit SHA
+	SecretsApplied      bool   // declared Secrets materialized from operator env vars
+	FluxInstalled       bool   // Flux components installed + GitRepository/Kustomization applied
+	GitRepositoryStatus string // informational Ready status of the forge-applied GitRepository (best-effort)
 }
 
 // ApplyOpts configures an apply run.
@@ -83,6 +88,7 @@ type ApplyOpts struct {
 	SkipGPU          bool           // skip the GPU readiness phase
 	SkipOverlay      bool           // skip the overlay phase (clone + chart values + CRD instances)
 	SkipSecrets      bool           // skip the secret-sync phase (materialize declared Secrets)
+	SkipFlux         bool           // skip the Flux GitOps phase (install + sync resources)
 	SecretResolver   SecretResolver // resolves declared secret values (env-or-prompt); nil => env-only fallback
 	GPUReadyTimeout  time.Duration  // default 15m (driver compile is slow on first boot)
 	GPUReadyInterval time.Duration  // default 5s
@@ -132,6 +138,8 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 	}
 	plan.OverlayRepo = cfg.Spec.Overlay.Repo
 	plan.OverlayRef = cfg.Spec.Overlay.Ref
+	plan.FluxEnabled = cfg.Spec.Flux.Enabled
+	plan.FluxVersion = cfg.Spec.Flux.Version
 
 	if !pf.Installed {
 		if !pf.HasCurl {
@@ -174,7 +182,7 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 
 // Apply runs Plan and, unless DryRun, executes the install/reconcile, fetches
 // and stores the kubeconfig, and waits for the node to be Ready.
-func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, opts ApplyOpts) (*Result, error) {
+func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer, opts ApplyOpts) (*Result, error) {
 	opts = opts.withDefaults()
 
 	plan, err := Plan(ctx, cfg, p)
@@ -225,6 +233,13 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 
 	// Overlay phase: clone → secret-sync → chart → CRD instances.
 	if err := applyOverlayPhase(ctx, cfg, o, d, opts, res); err != nil {
+		return res, err
+	}
+
+	// Flux phase: install Flux + apply GitRepository/Kustomization (continuous
+	// reconciliation of the overlay contents). Runs last (substrate + one-time
+	// overlay before continuous).
+	if err := applyFluxPhase(ctx, cfg, f, d, opts, res); err != nil {
 		return res, err
 	}
 
@@ -442,7 +457,12 @@ func isUbuntu(os string) bool { return strings.HasPrefix(os, "Ubuntu") }
 // configured), and then uninstalls k3s. Removal is best-effort so destroy always
 // proceeds to substrate removal (k3s-uninstall wipes all cluster resources,
 // including overlay CRD instances).
-func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer) error {
+func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer) error {
+	// Flux first (stop the reconciler before tearing down — reverse of apply's
+	// flux-last). Best-effort; k3s-uninstall wipes the cluster regardless.
+	if f != nil && cfg.Spec.Flux.Enabled {
+		_ = f.UninstallFlux(ctx)
+	}
 	if o != nil && cfg.Spec.Overlay.Repo != "" {
 		_ = o.Remove(ctx, overlayDestPath(cfg))
 	}
