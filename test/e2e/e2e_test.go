@@ -208,7 +208,7 @@ func generateKey(t *testing.T) (pubKeyStr, privKeyPath string) {
 
 func cloudInit(pubKeyStr string) string {
 	return fmt.Sprintf(`#cloud-config
-packages: [curl, git]
+packages: [curl]
 users:
   - name: forge
     sudo: ALL=(ALL) NOPASSWD:ALL
@@ -544,6 +544,11 @@ func writeEdgeOverlayOnHost(t *testing.T, ip, keyPath string) {
 	}
 	defer sc.Close()
 	script := fmt.Sprintf(`set -e
+# git is needed to init the overlay repo; install it if absent (mirrors forge's
+# EnsureGit). cloud-init only installs curl, so git may not be present yet.
+if ! command -v git >/dev/null 2>&1; then
+  sudo apt-get update -qq && sudo apt-get install -y git
+fi
 d=/tmp/edge-overlay
 rm -rf "$d"
 mkdir -p "$d/crds/client"
