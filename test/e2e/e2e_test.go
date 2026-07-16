@@ -122,6 +122,14 @@ func TestE2E(t *testing.T) {
 		t.Logf("debug pod dump (on failure):\n%s", out)
 		wl, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get deploy,daemonset,statefulset,job -A 2>&1")
 		t.Logf("debug workloads (deploy/ds/sts/job):\n%s", wl)
+		svc, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get svc -A 2>&1")
+		t.Logf("debug services:\n%s", svc)
+		hk, _ := sshOutput(sc, fmt.Sprintf("sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml get hooks %s -n iterabase-system 2>&1", runID))
+		t.Logf("helm hooks (confirm metallb-config is a hook):\n%s", hk)
+		// Re-run helm --debug --wait (30s) to capture what helm is polling — the
+		// --wait timeout error is terse; --debug logs the wait resource list.
+		dbg, _ := sshOutput(sc, fmt.Sprintf("sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml upgrade --install %s oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform --version 0.1.13 -n iterabase-system --create-namespace --wait --timeout 30s --debug -f /var/lib/forge/overlay/%s/values.yaml -f /var/lib/forge/overlay/%s/values.client.yaml 2>&1 | grep -iE 'wait|ready|not ready|deadline|deployment|daemonset|statefulset|service|pending|timed out|context' | head -60", runID, runID, runID))
+		t.Logf("helm --debug --wait (30s) re-run:\n%s", dbg)
 		hv, _ := sshOutput(sc, "sudo helm version 2>&1")
 		t.Logf("helm version: %s", hv)
 		hs, _ := sshOutput(sc, fmt.Sprintf("sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml status %s -n iterabase-system 2>&1", runID))
