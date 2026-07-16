@@ -370,7 +370,7 @@ func joinArgs(args []string) string {
 }
 
 const (
-	helmInstallScript = "https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3"
+	helmInstallScript = "https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4"
 	k3sKubeconfigPath = "/etc/rancher/k3s/k3s.yaml"
 )
 
