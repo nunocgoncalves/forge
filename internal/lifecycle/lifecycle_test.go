@@ -177,7 +177,7 @@ func TestApply_Install(t *testing.T) {
 		kubeconfig:        []byte(minKubeconfig),
 		readyAfterInstall: true,
 	}
-	res, err := Apply(context.Background(), testConfig(), p, nil, nil, ApplyOpts{
+	res, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -195,7 +195,7 @@ func TestApply_Install(t *testing.T) {
 func TestApply_DryRun(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig)}
-	res, err := Apply(context.Background(), testConfig(), p, nil, nil, ApplyOpts{DryRun: true})
+	res, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{DryRun: true})
 	require.NoError(t, err)
 	assert.Equal(t, ActionInstall, res.Plan.Action)
 	assert.Empty(t, p.installs) // no install
@@ -209,7 +209,7 @@ func TestApply_RefuseImmutable(t *testing.T) {
 	st.ClusterCIDR = "10.99.0.0/16,fd42::/48"
 	p := &fakeProv{pf: readyPf(), state: st, kubeconfig: []byte(minKubeconfig)}
 	p.pf.Installed = true
-	_, err := Apply(context.Background(), testConfig(), p, nil, nil, ApplyOpts{})
+	_, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{})
 	require.Error(t, err)
 	assert.Empty(t, p.installs)
 	assert.Contains(t, err.Error(), "immutable")
@@ -218,7 +218,7 @@ func TestApply_RefuseImmutable(t *testing.T) {
 func TestApply_NodeNotReady(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), ready: false}
-	_, err := Apply(context.Background(), testConfig(), p, nil, nil, ApplyOpts{
+	_, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{
 		ReadyTimeout: 100 * time.Millisecond, ReadyInterval: 20 * time.Millisecond,
 	})
 	require.Error(t, err)
@@ -229,7 +229,7 @@ func TestApply_KubeconfigOut(t *testing.T) {
 	useTempHome(t)
 	out := filepath.Join(t.TempDir(), "kc.yaml")
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
-	res, err := Apply(context.Background(), testConfig(), p, nil, nil, ApplyOpts{
+	res, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{
 		KubeconfigOut: out, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -373,7 +373,7 @@ func TestApply_Chart(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
-	res, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, ApplyOpts{
+	res, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -388,7 +388,7 @@ func TestApply_SkipChart(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
-	_, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, ApplyOpts{
+	_, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, nil, ApplyOpts{
 		SkipChart: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -399,7 +399,7 @@ func TestDestroy_Chart(t *testing.T) {
 	p := &fakeProv{pf: readyPf(), state: inSyncState()}
 	p.pf.Installed = true
 	d := &fakeDeployer{}
-	require.NoError(t, Destroy(context.Background(), testConfigWithChart(), p, d, nil))
+	require.NoError(t, Destroy(context.Background(), testConfigWithChart(), p, d, nil, nil))
 	require.Len(t, d.uninstallCalls, 1)
 	assert.Equal(t, "opo1", d.uninstallCalls[0].release)
 	assert.False(t, p.state.Installed) // k3s uninstalled too
@@ -409,7 +409,7 @@ func TestDestroy_NoChart(t *testing.T) {
 	p := &fakeProv{pf: readyPf(), state: inSyncState()}
 	p.pf.Installed = true
 	d := &fakeDeployer{}
-	require.NoError(t, Destroy(context.Background(), testConfig(), p, d, nil))
+	require.NoError(t, Destroy(context.Background(), testConfig(), p, d, nil, nil))
 	assert.Empty(t, d.uninstallCalls) // no chart configured
 	assert.False(t, p.state.Installed)
 }
@@ -471,7 +471,7 @@ func TestApply_GPU(t *testing.T) {
 		gpuReady:          true,
 	}
 	d := &fakeDeployer{}
-	res, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, ApplyOpts{
+	res, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
 	})
@@ -516,7 +516,7 @@ func TestApply_SkipGPU(t *testing.T) {
 		gpuReady:          true,
 	}
 	d := &fakeDeployer{}
-	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, ApplyOpts{
+	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, nil, ApplyOpts{
 		SkipGPU: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -535,7 +535,7 @@ func TestApply_GPU_NotReady(t *testing.T) {
 		gpuReady:          false, // ClusterPolicy never reaches ready
 	}
 	d := &fakeDeployer{}
-	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, ApplyOpts{
+	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 		GPUReadyTimeout: 100 * time.Millisecond, GPUReadyInterval: 20 * time.Millisecond,
 	})
@@ -547,7 +547,7 @@ func TestDestroy_GPU(t *testing.T) {
 	p := &fakeProv{pf: gpuReadyPf(), state: inSyncState()}
 	p.pf.Installed = true
 	d := &fakeDeployer{}
-	require.NoError(t, Destroy(context.Background(), testConfigWithGPU(), p, d, nil))
+	require.NoError(t, Destroy(context.Background(), testConfigWithGPU(), p, d, nil, nil))
 	require.Len(t, d.uninstallCalls, 2)                               // chart + gpu operator
 	assert.Equal(t, "opo1", d.uninstallCalls[0].release)              // chart first
 	assert.Equal(t, "opo1-gpu-operator", d.uninstallCalls[1].release) // then operator
@@ -562,7 +562,7 @@ func TestApply_Overlay(t *testing.T) {
 	cfg := testConfigWithChart()
 	cfg.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
 
-	res, err := Apply(context.Background(), cfg, p, d, o, ApplyOpts{
+	res, err := Apply(context.Background(), cfg, p, d, o, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -593,7 +593,7 @@ func TestApply_Overlay_TokenPassthrough(t *testing.T) {
 	cfg := testConfigWithChart()
 	cfg.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
 
-	_, err := Apply(context.Background(), cfg, p, d, o, ApplyOpts{
+	_, err := Apply(context.Background(), cfg, p, d, o, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 		OverlayToken: []byte("ghp_secret"),
 	})
@@ -609,7 +609,7 @@ func TestApply_Overlay_SkippedWhenNoRepo(t *testing.T) {
 	o := &fakeOverlayer{}
 	cfg := testConfigWithChart() // no overlay
 
-	res, err := Apply(context.Background(), cfg, p, d, o, ApplyOpts{
+	res, err := Apply(context.Background(), cfg, p, d, o, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -628,7 +628,7 @@ func TestApply_Overlay_SkipFlag(t *testing.T) {
 	cfg := testConfigWithChart()
 	cfg.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
 
-	res, err := Apply(context.Background(), cfg, p, d, o, ApplyOpts{
+	res, err := Apply(context.Background(), cfg, p, d, o, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 		SkipOverlay: true,
 	})
@@ -644,7 +644,7 @@ func TestDestroy_Overlay(t *testing.T) {
 	cfg := testConfigWithChart()
 	cfg.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
 
-	require.NoError(t, Destroy(context.Background(), cfg, p, d, o))
+	require.NoError(t, Destroy(context.Background(), cfg, p, d, o, nil))
 	require.Len(t, o.removeCalls, 1)
 	assert.Equal(t, "/var/lib/forge/overlay/opo1", o.removeCalls[0])
 }
@@ -687,7 +687,7 @@ func TestApply_Secrets(t *testing.T) {
 	d := &fakeDeployer{}
 	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileContent: overlaySecretsYAML()}
 	r := &fakeSecretResolver{value: "supersecret-token"}
-	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, ApplyOpts{
+	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond, SecretResolver: r,
 	})
 	require.NoError(t, err)
@@ -740,7 +740,7 @@ func TestApply_Secrets_UnsetEnv(t *testing.T) {
 	d := &fakeDeployer{}
 	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileContent: overlaySecretsYAML()}
 	r := &fakeSecretResolver{unset: true} // resolver can't provide a value (env unset + non-interactive)
-	_, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, ApplyOpts{
+	_, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond, SecretResolver: r,
 	})
 	require.Error(t, err)
@@ -755,7 +755,7 @@ func TestApply_SkipSecrets(t *testing.T) {
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
 	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileContent: overlaySecretsYAML()}
-	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, ApplyOpts{
+	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, nil, ApplyOpts{
 		SkipSecrets: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -770,7 +770,7 @@ func TestApply_Secrets_NoSecretsFile(t *testing.T) {
 	d := &fakeDeployer{}
 	// overlay cloned but has no secrets.yaml (ReadFile returns not-found).
 	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileErr: errors.New("overlay read secrets.yaml: No such file or directory")}
-	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, ApplyOpts{
+	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -783,10 +783,249 @@ func TestApply_Secrets_NoOverlay(t *testing.T) {
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
 	o := &fakeOverlayer{} // no overlay.repo ⇒ no clone
-	res, err := Apply(context.Background(), testConfigWithChart(), p, d, o, ApplyOpts{
+	res, err := Apply(context.Background(), testConfigWithChart(), p, d, o, nil, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
 	assert.False(t, res.SecretsApplied)
 	assert.Empty(t, d.applyManifestCalls, "no overlay ⇒ no secrets")
+}
+
+// fakeFluxer is a controllable fluxer.Fluxer for lifecycle flux tests.
+type fakeFluxer struct {
+	ensureVersion  string
+	ensureErr      error
+	ensureCalls    int
+	uninstallCalls int
+	gitRepoStatus  string
+}
+
+func (f *fakeFluxer) EnsureFlux(_ context.Context, version string) error {
+	f.ensureCalls++
+	f.ensureVersion = version
+	return f.ensureErr
+}
+func (f *fakeFluxer) UninstallFlux(_ context.Context) error {
+	f.uninstallCalls++
+	return nil
+}
+func (f *fakeFluxer) GitRepositoryStatus(_ context.Context, _ string) (string, error) {
+	return f.gitRepoStatus, nil
+}
+
+// testConfigWithFlux extends the overlay config (chart + https overlay) with
+// Flux enabled at a pinned version.
+func testConfigWithFlux() *config.Cluster {
+	c := testConfigWithOverlay()
+	c.Spec.Flux = config.Flux{Enabled: true, Version: "v2.4.0"}
+	return c
+}
+
+func TestApply_Flux(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{gitRepoStatus: "True"}
+	cfg := testConfigWithFlux()
+
+	res, err := Apply(context.Background(), cfg, p, d, o, fx, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		OverlayToken: []byte("ghp_secret"),
+	})
+	require.NoError(t, err)
+	assert.True(t, res.FluxInstalled)
+	assert.Equal(t, "True", res.GitRepositoryStatus)
+
+	// EnsureFlux called with the configured version.
+	require.Equal(t, 1, fx.ensureCalls)
+	assert.Equal(t, "v2.4.0", fx.ensureVersion)
+
+	// Three sync resources applied via stdin: token Secret → GitRepository →
+	// Kustomization (in that order, after EnsureFlux which installs the CRDs).
+	require.Len(t, d.applyManifestCalls, 3)
+	sec, repo, kust := d.applyManifestCalls[0], d.applyManifestCalls[1], d.applyManifestCalls[2]
+	assert.Contains(t, sec, `"Secret"`)
+	assert.Contains(t, sec, `"overlay-git-auth"`)
+	assert.Contains(t, sec, "ghp_secret", "token piped via stdin manifest (stringData)")
+	assert.Contains(t, repo, `"GitRepository"`)
+	assert.Contains(t, repo, `"overlay"`)
+	assert.Contains(t, repo, `"secretRef"`)
+	assert.Contains(t, repo, `"overlay-git-auth"`)
+	assert.Contains(t, kust, `"Kustomization"`)
+	assert.Contains(t, kust, `"overlay-crds"`)
+	assert.Contains(t, kust, `"./crds/client"`)
+	assert.Contains(t, kust, `"prune":true`)
+
+	// The token never reaches helm values (it stays in the stdin Secret).
+	for _, c := range d.applyCalls {
+		for _, v := range c.values {
+			assert.NotContains(t, v, "ghp_secret")
+		}
+	}
+
+	// Flux phase runs LAST: the manifest applies come after the chart + CRD
+	// kustomize (substrate + one-time overlay before continuous).
+	kustomizeIdx := -1
+	firstManifestIdx := -1
+	for i, op := range d.order {
+		if op == "kustomize" && kustomizeIdx == -1 {
+			kustomizeIdx = i
+		}
+		if op == "manifest" && firstManifestIdx == -1 {
+			firstManifestIdx = i
+		}
+	}
+	assert.Greater(t, firstManifestIdx, kustomizeIdx, "flux manifests applied after the overlay CRD kustomize")
+}
+
+func TestApply_Flux_PublicRepoNoToken(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{}
+	cfg := testConfigWithFlux()
+
+	res, err := Apply(context.Background(), cfg, p, d, o, fx, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		// no OverlayToken => public repo => Flux clones anonymously.
+	})
+	require.NoError(t, err)
+	assert.True(t, res.FluxInstalled)
+
+	// No token Secret (only GitRepository + Kustomization); GitRepository has no
+	// secretRef (Flux clones anonymously).
+	require.Len(t, d.applyManifestCalls, 2)
+	repo, kust := d.applyManifestCalls[0], d.applyManifestCalls[1]
+	assert.Contains(t, repo, `"GitRepository"`)
+	assert.NotContains(t, repo, `"secretRef"`, "public repo => no secretRef")
+	assert.NotContains(t, repo, "ghp_secret")
+	assert.Contains(t, kust, `"Kustomization"`)
+}
+
+func TestApply_Flux_SkipFlag(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{}
+	cfg := testConfigWithFlux()
+
+	res, err := Apply(context.Background(), cfg, p, d, o, fx, ApplyOpts{
+		SkipFlux: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.FluxInstalled)
+	assert.Equal(t, 0, fx.ensureCalls, "SkipFlux skips EnsureFlux")
+	assert.Empty(t, d.applyManifestCalls, "SkipFlux skips the sync resources")
+}
+
+func TestApply_Flux_DisabledNoPhase(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{}
+	cfg := testConfigWithOverlay() // flux not enabled
+
+	res, err := Apply(context.Background(), cfg, p, d, o, fx, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.FluxInstalled)
+	assert.Equal(t, 0, fx.ensureCalls, "Flux disabled => phase skipped even with a fluxer wired")
+	assert.Empty(t, d.applyManifestCalls)
+}
+
+func TestApply_Flux_NoFluxerWired(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	cfg := testConfigWithFlux()
+
+	_, err := Apply(context.Background(), cfg, p, d, o, nil, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fluxer")
+}
+
+func TestApply_Flux_EnsureFluxFails(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{ensureErr: fmt.Errorf("flux install: network")}
+	cfg := testConfigWithFlux()
+
+	_, err := Apply(context.Background(), cfg, p, d, o, fx, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "flux install")
+	assert.Empty(t, d.applyManifestCalls, "sync resources not applied when EnsureFlux fails")
+}
+
+func TestDestroy_Flux(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{}
+	fx := &fakeFluxer{}
+	cfg := testConfigWithFlux()
+
+	require.NoError(t, Destroy(context.Background(), cfg, p, d, o, fx))
+	assert.Equal(t, 1, fx.uninstallCalls, "Flux uninstalled on destroy")
+}
+
+func TestDestroy_Flux_Disabled(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{}
+	fx := &fakeFluxer{}
+	cfg := testConfigWithOverlay() // flux not enabled
+
+	require.NoError(t, Destroy(context.Background(), cfg, p, d, o, fx))
+	assert.Equal(t, 0, fx.uninstallCalls, "Flux disabled => not uninstalled")
+}
+
+func TestDestroy_Flux_NoFluxer(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{}
+	cfg := testConfigWithFlux()
+
+	// nil fluxer + flux enabled => best-effort skip (k3s-uninstall wipes it).
+	require.NoError(t, Destroy(context.Background(), cfg, p, d, o, nil))
+}
+
+func TestFluxManifest_GitRepository_RefBranchVsTag(t *testing.T) {
+	// A branch ref => ref.branch.
+	branch := gitRepositoryManifest("overlay", "flux-system", "https://example/o.git", "master", "")
+	assert.Contains(t, branch, `"branch":"master"`)
+	assert.NotContains(t, branch, `"tag"`)
+	// A semver tag ref => ref.tag.
+	tag := gitRepositoryManifest("overlay", "flux-system", "https://example/o.git", "v0.1.0", "")
+	assert.Contains(t, tag, `"tag":"v0.1.0"`)
+	assert.NotContains(t, tag, `"branch"`)
+}
+
+func TestFluxManifest_GitRepository_SecretRefOmission(t *testing.T) {
+	withRef := gitRepositoryManifest("overlay", "flux-system", "https://example/o.git", "master", "overlay-git-auth")
+	assert.Contains(t, withRef, `"secretRef"`)
+	assert.Contains(t, withRef, `"overlay-git-auth"`)
+	withoutRef := gitRepositoryManifest("overlay", "flux-system", "https://example/o.git", "master", "")
+	assert.NotContains(t, withoutRef, `"secretRef"`)
+}
+
+func TestFluxManifest_TokenSecret(t *testing.T) {
+	m := fluxTokenSecretManifest("overlay-git-auth", "flux-system", "git", []byte("ghp_secret"))
+	assert.Contains(t, m, `"Secret"`)
+	assert.Contains(t, m, `"Opaque"`)
+	assert.Contains(t, m, `"username":"git"`)
+	assert.Contains(t, m, `"password":"ghp_secret"`)
 }
