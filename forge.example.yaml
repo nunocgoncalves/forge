@@ -22,7 +22,9 @@ spec:
     serviceCIDRv6: fd43::/112
     disable: [traefik, servicelb]   # umbrella chart owns ingress (HOR-239)
     extraArgs: []
-  flux: { enabled: false }     # forge action; reserved, deferred (HOR-239+)
+  flux:                        # opt-in Flux GitOps (HOR-292); empty/false => Flux phase skipped
+    enabled: false              # install Flux + apply GitRepository/Kustomization watching the overlay fork
+    version: "v2.4.0"           # flux2 release tag; default if omitted
   overlay:                     # client-fork overlay repo; empty => overlay phase skipped (HOR-341)
     repo: ""                   # client-fork git URL (https:// or file://); forge apply --overlay overrides
     ref: master                # branch or tag (default master)

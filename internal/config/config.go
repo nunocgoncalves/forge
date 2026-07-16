@@ -80,9 +80,47 @@ type K3s struct {
 	ExtraArgs     []string `yaml:"extraArgs"`
 }
 
-// Flux is the (reserved) Flux install toggle.
+// Flux is the opt-in Flux GitOps toggle. When Enabled, forge installs Flux
+// (flux install) on the forge-provisioned cluster and applies a GitRepository +
+// Kustomization pointing at the client overlay fork (overlay.repo) for
+// continuous reconciliation of the overlay contents (CRD instances +, later, the
+// pi/ tree). The platform Helm release stays forge-managed; Flux does not run a
+// HelmRelease (no dual-ownership of the chart). v1: requires an https://
+// overlay.repo — Flux source-controller fetches from a remote git server and
+// cannot watch a file:// local path.
 type Flux struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled bool   `yaml:"enabled"`
+	Version string `yaml:"version"` // flux2 release tag (semver, e.g. v2.4.0); default defaultFluxVersion
+}
+
+const defaultFluxVersion = "v2.4.0"
+
+// applyDefaults fills the flux2 version default when Flux is enabled. When
+// disabled, the Flux phase is skipped and defaults stay empty.
+func (f *Flux) applyDefaults() {
+	if !f.Enabled {
+		return
+	}
+	if f.Version == "" {
+		f.Version = defaultFluxVersion
+	}
+}
+
+// validate enforces v1 constraints on the Flux configuration. Flux requires an
+// https:// overlay.repo (source-controller fetches from a remote git server; it
+// cannot watch a file:// local path, and an empty repo gives Flux nothing to
+// watch). A disabled Flux config is always valid.
+func (f Flux) validate(overlay Overlay) error {
+	if !f.Enabled {
+		return nil
+	}
+	if overlay.Repo == "" {
+		return fmt.Errorf("flux.enabled requires overlay.repo to be set (Flux watches the client overlay fork)")
+	}
+	if !strings.HasPrefix(overlay.Repo, "https://") {
+		return fmt.Errorf("flux.enabled requires an https:// overlay.repo (Flux source-controller cannot watch %q; file:// is a forge-apply-only dev path)", overlay.Repo)
+	}
+	return nil
 }
 
 // Overlay is the client-fork overlay repo pointer (no base-ref). When Repo is
@@ -260,6 +298,7 @@ func (c *Cluster) Validate() error {
 	c.Spec.Chart.applyDefaults(c.Metadata.Name)
 	c.Spec.GPU.applyDefaults(c.Metadata.Name)
 	c.Spec.Overlay.applyDefaults()
+	c.Spec.Flux.applyDefaults()
 	return c.Spec.validate()
 }
 
@@ -283,6 +322,9 @@ func (s *Spec) validate() error {
 		return err
 	}
 	if err := s.Overlay.validate(); err != nil {
+		return err
+	}
+	if err := s.Flux.validate(s.Overlay); err != nil {
 		return err
 	}
 	return s.K3s.validate()

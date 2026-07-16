@@ -247,3 +247,70 @@ func TestParse_OverlayFileURL(t *testing.T) {
 	assert.Equal(t, "file:///tmp/overlay", c.Spec.Overlay.Repo)
 	assert.Equal(t, DefaultOverlayRef, c.Spec.Overlay.Ref)
 }
+
+func TestParse_FluxDefaults(t *testing.T) {
+	c, err := Parse(yamlFor(t, func(cc *Cluster) {
+		cc.Spec.Overlay = Overlay{Repo: "https://github.com/example/iterabase-overlay.git"}
+		cc.Spec.Flux = Flux{Enabled: true}
+	}))
+	require.NoError(t, err)
+	assert.True(t, c.Spec.Flux.Enabled)
+	assert.Equal(t, defaultFluxVersion, c.Spec.Flux.Version, "flux.version defaults when enabled + omitted")
+}
+
+func TestParse_FluxDisabledNoDefaults(t *testing.T) {
+	c, err := Parse(yamlFor(t, nil))
+	require.NoError(t, err)
+	assert.False(t, c.Spec.Flux.Enabled)
+	assert.Empty(t, c.Spec.Flux.Version, "no default version when Flux disabled")
+}
+
+func TestParse_FluxKeepsExplicitVersion(t *testing.T) {
+	c, err := Parse(yamlFor(t, func(cc *Cluster) {
+		cc.Spec.Overlay = Overlay{Repo: "https://github.com/example/iterabase-overlay.git"}
+		cc.Spec.Flux = Flux{Enabled: true, Version: "v9.9.9"}
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, "v9.9.9", c.Spec.Flux.Version, "explicit version preserved")
+}
+
+func TestFluxValidate_RequiresOverlay(t *testing.T) {
+	err := Flux{Enabled: true, Version: defaultFluxVersion}.validate(Overlay{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overlay.repo")
+}
+
+func TestFluxValidate_RequiresHTTPS(t *testing.T) {
+	err := Flux{Enabled: true, Version: defaultFluxVersion}.validate(Overlay{Repo: "file:///tmp/overlay", Ref: "master"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "https://")
+	assert.Contains(t, err.Error(), "file://")
+}
+
+func TestFluxValidate_HTTPSOK(t *testing.T) {
+	err := Flux{Enabled: true, Version: defaultFluxVersion}.validate(Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"})
+	require.NoError(t, err)
+}
+
+func TestFluxValidate_DisabledIgnoresOverlay(t *testing.T) {
+	// A disabled Flux is valid regardless of overlay (even file:// / empty).
+	require.NoError(t, Flux{}.validate(Overlay{}))
+	require.NoError(t, Flux{}.validate(Overlay{Repo: "file:///tmp/overlay", Ref: "master"}))
+}
+
+func TestParse_FluxEnabledFileURLRejected(t *testing.T) {
+	_, err := Parse(yamlFor(t, func(cc *Cluster) {
+		cc.Spec.Overlay = Overlay{Repo: "file:///tmp/overlay", Ref: "master"}
+		cc.Spec.Flux = Flux{Enabled: true}
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "https://")
+}
+
+func TestParse_FluxEnabledNoOverlayRejected(t *testing.T) {
+	_, err := Parse(yamlFor(t, func(cc *Cluster) {
+		cc.Spec.Flux = Flux{Enabled: true}
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overlay.repo")
+}
