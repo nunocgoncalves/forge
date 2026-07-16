@@ -351,7 +351,7 @@ func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 		switch {
 		case cmd == "command -v helm":
 			return "", 1 // absent
-		case strings.Contains(cmd, "get-helm-3"):
+		case strings.Contains(cmd, "get-helm-4"):
 			return "", 0 // install script
 		case strings.Contains(cmd, "upgrade"):
 			return "", 0
