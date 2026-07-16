@@ -19,9 +19,12 @@ const fluxInstallScript = "https://fluxcd.io/install.sh"
 // against the k3s kubeconfig. Idempotent.
 func (p *SSHProvisioner) EnsureFlux(ctx context.Context, version string) error {
 	if _, err := p.run(ctx, "command -v flux"); err != nil {
-		// Install the flux CLI at the pinned version. FLUX_VERSION selects the
-		// release tag the install script fetches.
-		if _, err := p.run(ctx, fmt.Sprintf("curl -fsSL %s | sudo FLUX_VERSION=%s bash", fluxInstallScript, shellQuote(version))); err != nil {
+		// The official install script prepends "v" to FLUX_VERSION internally when
+		// building the release URL, so pass the version WITHOUT the leading "v"
+		// (the config stores the release tag "vX.Y.Z"). flux install --version
+		// below takes the tag verbatim (with "v").
+		fluxVer := strings.TrimPrefix(version, "v")
+		if _, err := p.run(ctx, fmt.Sprintf("curl -fsSL %s | sudo FLUX_VERSION=%s bash", fluxInstallScript, shellQuote(fluxVer))); err != nil {
 			return fmt.Errorf("install flux cli: %w", err)
 		}
 	}

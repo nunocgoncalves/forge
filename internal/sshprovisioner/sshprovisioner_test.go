@@ -832,7 +832,7 @@ func TestFluxer_EnsureFlux_InstallsCLI(t *testing.T) {
 	// CLI install script is version-pinned via FLUX_VERSION; the version never
 	// appears bare in a way that could mismatch a tag filter.
 	assert.Contains(t, gotInstall, "fluxcd.io/install.sh")
-	assert.Contains(t, gotInstall, "FLUX_VERSION='v2.4.0'")
+	assert.Contains(t, gotInstall, "FLUX_VERSION='2.4.0'", "install script takes the version without the leading v (it prepends v internally)")
 	// flux install runs against the k3s kubeconfig via KUBECONFIG env (sudo root
 	// reads the root-owned 0600 kubeconfig); version pinned.
 	assert.Contains(t, gotFluxInstall, "KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
