@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/nunocgoncalves/forge/internal/config"
+	"github.com/nunocgoncalves/forge/internal/lifecycle"
 )
 
 type fakePasswordPrompter struct {
@@ -89,4 +93,36 @@ func TestResolveOverlayToken_FileURLNoToken(t *testing.T) {
 	assert.Nil(t, tok, "file:// needs no token")
 	assert.Equal(t, 0, tp.calls)
 	assert.Equal(t, 0, sc.calls)
+}
+
+func TestPrintApplyResult_Flux(t *testing.T) {
+	var out bytes.Buffer
+	cfg := &config.Cluster{
+		Metadata: config.Metadata{Name: "opo1"},
+		Spec:     config.Spec{Flux: config.Flux{Enabled: true, Version: "v2.4.0"}},
+	}
+	res := &lifecycle.Result{Plan: &lifecycle.ReconcilePlan{}, FluxInstalled: true, GitRepositoryStatus: "True"}
+	printApplyResult(&out, cfg, res)
+	s := out.String()
+	assert.Contains(t, s, "flux: v2.4.0")
+	assert.Contains(t, s, "flux installed: true", "e2e asserts on this exact substring (one space)")
+	assert.Contains(t, s, "gitrepository: True")
+}
+
+func TestPrintApplyResult_FluxNotReady(t *testing.T) {
+	var out bytes.Buffer
+	cfg := &config.Cluster{
+		Metadata: config.Metadata{Name: "opo1"},
+		Spec:     config.Spec{Flux: config.Flux{Enabled: true, Version: "v2.4.0"}},
+	}
+	res := &lifecycle.Result{Plan: &lifecycle.ReconcilePlan{}, FluxInstalled: true, GitRepositoryStatus: ""} // not reconciled yet
+	printApplyResult(&out, cfg, res)
+	assert.Contains(t, out.String(), "not ready yet")
+}
+
+func TestPrintApplyResult_FluxDisabled(t *testing.T) {
+	var out bytes.Buffer
+	cfg := &config.Cluster{Metadata: config.Metadata{Name: "opo1"}} // flux disabled
+	printApplyResult(&out, cfg, &lifecycle.Result{Plan: &lifecycle.ReconcilePlan{}})
+	assert.NotContains(t, out.String(), "flux")
 }
