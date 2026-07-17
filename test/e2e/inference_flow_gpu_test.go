@@ -100,6 +100,12 @@ metadata:
 spec:
   kind: vLLM
   model: Qwen/Qwen3.5-0.8B
+  # extraArgs (HOR-370): a safe serving flag appended after the
+  # controller-managed --model/--port/--host. --max-model-len caps context
+  # (well within Qwen3.5-0.8B's limit); asserted on the rendered pod below.
+  extraArgs:
+    - --max-model-len
+    - "8192"
 ---
 apiVersion: platform.iterabase.com/v1alpha1
 kind: Model
@@ -171,6 +177,16 @@ spec:
 		t.Fatalf("model %q never became available within 25m (vLLM pod not healthy; see diagnostics above)", alias)
 	}
 	t.Logf("model available: alias=%s backend=%s", entry.ModelID, entry.BackendURL)
+
+	// HOR-375: assert spec.extraArgs are appended to the vLLM container args
+	// (the control-plane renders them after --model/--port/--host). Validates
+	// the extraArgs field end-to-end on the real vLLM serving path.
+	renderedArgs := strings.TrimSpace(c.Kubectl(t, "get", "deployment", mbName, "-n", namespace,
+		"-o", "jsonpath={.spec.template.spec.containers[0].args}"))
+	require.Contains(t, renderedArgs, "--max-model-len",
+		"HOR-370: spec.extraArgs (--max-model-len) must be appended to the vLLM container args")
+	require.Contains(t, renderedArgs, "8192",
+		"HOR-370: spec.extraArgs value must be appended to the vLLM container args")
 
 	// 9. curl /v1/chat/completions with the gateway key -> a real completion.
 	status, body := chatCompletionsStatus(t, gwClient, gwBase, gatewayKey, alias)
