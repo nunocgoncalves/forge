@@ -242,7 +242,10 @@ func TestReadState_Installed(t *testing.T) {
 		case "sudo k3s --version":
 			return "k3s version v1.31.5+k3s1 (abcdef)\n", 0
 		case "sudo cat /etc/systemd/system/k3s.service":
-			return "[Unit]\nDescription=k3s\n[Service]\nExecStart=/usr/local/bin/k3s server --cluster-cidr 10.42.0.0/16,fd42::/48 --service-cidr 10.43.0.0/16,fd43::/112 --flannel-backend=vxlan --tls-san 10.20.0.10 --disable traefik --disable servicelb --write-kubeconfig-mode 0600\n[Install]\n", 0
+			// Mirrors the exact unit the k3s install script (get.k3s.io) writes:
+			// each ExecStart arg on its own backslash-continued line, single-quoted
+			// by the script's quote() helper.
+			return "[Unit]\nDescription=Lightweight Kubernetes\n[Service]\nExecStart=/usr/local/bin/k3s \\\n    server \\\n\t'--cluster-cidr' \\\n\t'10.42.0.0/16,fd42::/48' \\\n\t'--service-cidr' \\\n\t'10.43.0.0/16,fd43::/112' \\\n\t'--flannel-backend=vxlan' \\\n\t'--tls-san' \\\n\t'10.20.0.10' \\\n\t'--disable' \\\n\t'traefik' \\\n\t'--disable' \\\n\t'servicelb' \\\n\t'--write-kubeconfig-mode' \\\n\t'0600' \\\n[Install]\n", 0
 		default:
 			return "", 1
 		}
@@ -271,6 +274,118 @@ func TestReadState_NotInstalled(t *testing.T) {
 	st, err := p.ReadState(context.Background())
 	require.NoError(t, err)
 	assert.False(t, st.Installed)
+}
+
+func TestParseSystemdUnit(t *testing.T) {
+	// realQuotedDualStack mirrors the exact unit the k3s install script
+	// (get.k3s.io) writes for a dual-stack install: every ExecStart arg on its
+	// own backslash-continued line, single-quoted by the script's quote().
+	const realQuotedDualStack = `[Unit]
+Description=Lightweight Kubernetes
+[Service]
+ExecStart=/usr/local/bin/k3s \
+    server \
+	'--cluster-cidr' \
+	'10.42.0.0/16,fd42::/48' \
+	'--service-cidr' \
+	'10.43.0.0/16,fd43::/112' \
+	'--flannel-backend=vxlan' \
+	'--disable' \
+	'traefik' \
+	'--write-kubeconfig-mode' \
+	'0600' \
+[Install]
+`
+	const realQuotedSingleStack = `[Unit]
+Description=Lightweight Kubernetes
+[Service]
+ExecStart=/usr/local/bin/k3s \
+    server \
+	'--cluster-cidr' \
+	'10.42.0.0/16' \
+	'--service-cidr' \
+	'10.43.0.0/16' \
+	'--flannel-backend=vxlan' \
+[Install]
+`
+
+	tests := []struct {
+		name            string
+		unit            string
+		wantClusterCIDR string
+		wantServiceCIDR string
+		wantDualStack   bool
+	}{
+		{
+			name:            "install-script quoted dual-stack",
+			unit:            realQuotedDualStack,
+			wantClusterCIDR: "10.42.0.0/16,fd42::/48",
+			wantServiceCIDR: "10.43.0.0/16,fd43::/112",
+			wantDualStack:   true,
+		},
+		{
+			name:            "install-script quoted single-stack",
+			unit:            realQuotedSingleStack,
+			wantClusterCIDR: "10.42.0.0/16",
+			wantServiceCIDR: "10.43.0.0/16",
+			wantDualStack:   false,
+		},
+		{
+			name:            "unquoted space-separated (legacy)",
+			unit:            "ExecStart=/usr/local/bin/k3s server --cluster-cidr 10.42.0.0/16,fd42::/48 --service-cidr 10.43.0.0/16,fd43::/112\n",
+			wantClusterCIDR: "10.42.0.0/16,fd42::/48",
+			wantServiceCIDR: "10.43.0.0/16,fd43::/112",
+			wantDualStack:   true,
+		},
+		{
+			name:            "equals form unquoted",
+			unit:            "ExecStart=/usr/local/bin/k3s server --cluster-cidr=10.42.0.0/16,fd42::/48 --service-cidr=10.43.0.0/16,fd43::/112\n",
+			wantClusterCIDR: "10.42.0.0/16,fd42::/48",
+			wantServiceCIDR: "10.43.0.0/16,fd43::/112",
+			wantDualStack:   true,
+		},
+		{
+			name:            "equals form quoted",
+			unit:            "ExecStart=/usr/local/bin/k3s \\\n    server \\\n\t'--cluster-cidr=10.42.0.0/16,fd42::/48' \\\n\t'--service-cidr=10.43.0.0/16,fd43::/112' \\\n",
+			wantClusterCIDR: "10.42.0.0/16,fd42::/48",
+			wantServiceCIDR: "10.43.0.0/16,fd43::/112",
+			wantDualStack:   true,
+		},
+		{
+			name: "embedded single quote in value is unescaped",
+			// k3s quote() escapes an embedded single quote with the POSIX
+			// backslash-quote sequence. The parser must restore the original. Use a
+			// raw string so the backslash is preserved literally (in a double-quoted
+			// literal a backslash before a quote would collapse to a bare quote).
+			unit: `ExecStart=/usr/local/bin/k3s server '--cluster-cidr' 'a'\''b,c::/48'
+`,
+			wantClusterCIDR: "a'b,c::/48",
+			wantServiceCIDR: "",
+			wantDualStack:   true,
+		},
+		{
+			name:            "no execstart args",
+			unit:            "[Service]\nExecStart=/usr/local/bin/k3s server\n",
+			wantClusterCIDR: "",
+			wantServiceCIDR: "",
+			wantDualStack:   false,
+		},
+		{
+			name:            "empty unit",
+			unit:            "",
+			wantClusterCIDR: "",
+			wantServiceCIDR: "",
+			wantDualStack:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cc, sc, ds := parseSystemdUnit(tt.unit)
+			assert.Equal(t, tt.wantClusterCIDR, cc, "clusterCIDR")
+			assert.Equal(t, tt.wantServiceCIDR, sc, "serviceCIDR")
+			assert.Equal(t, tt.wantDualStack, ds, "dualStack")
+		})
+	}
 }
 
 func TestNodeReady(t *testing.T) {
