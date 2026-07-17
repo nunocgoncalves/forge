@@ -318,13 +318,18 @@ func dumpGPUDiagnostics(t *testing.T, ip, keyPath string) {
 	t.Log("=== GPU diagnostics ===")
 	// Ordered most-diagnostic-first for a ClusterPolicy stall: the describe
 	// shows per-component state (driver/toolkit/devicePlugin/...) with the
-	// message of whichever component is NotReady, and the driver DaemonSet
-	// logs hold the kernel-module compile output (the usual slow/stuck path).
+	// message of whichever component is NotReady. In practice the stall is the
+	// operator-validator cuda-validation container crash-looping (state-
+	// operator-validation), so its describe + logs come before the driver/toolkit
+	// ds logs (the driver compile is rarely the culprit).
 	cmds := []string{
 		"sudo k3s kubectl get clusterpolicy -o jsonpath='{range .items[*]}{.metadata.name}: state={.status.state}{\"\\n\"}{end}'",
 		"sudo k3s kubectl describe clusterpolicy",
 		"sudo k3s kubectl get pods -n gpu-operator -o wide",
 		"sudo k3s kubectl get ds -n gpu-operator -o wide",
+		"sudo k3s kubectl describe pod -n gpu-operator -l app=nvidia-operator-validator",
+		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-operator-validator -c cuda-validation --tail=100",
+		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-operator-validator -c cuda-validation --previous --tail=100",
 		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-driver-daemonset --tail=100 --all-containers=true",
 		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-driver-daemonset --previous --tail=100 --all-containers=true",
 		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-container-toolkit-daemonset --tail=100 --all-containers=true",
