@@ -326,21 +326,44 @@ func parseK3sVersion(out string) string {
 }
 
 func parseSystemdUnit(out string) (clusterCIDR, serviceCIDR string, dualStack bool) {
+	// The k3s install script (get.k3s.io) writes the server flags into the
+	// unit's ExecStart line, one per line with backslash-newline continuations,
+	// and wraps every argument in single quotes via its quote() helper. Join the
+	// continuation lines first so each ExecStart arg becomes a single
+	// whitespace-delimited token.
+	out = strings.ReplaceAll(out, "\\\r\n", " ")
+	out = strings.ReplaceAll(out, "\\\n", " ")
+
 	tokens := strings.Fields(out)
-	for i, tok := range tokens {
+	for i, raw := range tokens {
+		tok := unquoteShellToken(raw)
 		switch {
 		case tok == "--cluster-cidr" && i+1 < len(tokens):
-			clusterCIDR = tokens[i+1]
+			clusterCIDR = unquoteShellToken(tokens[i+1])
 		case strings.HasPrefix(tok, "--cluster-cidr="):
 			clusterCIDR = strings.TrimPrefix(tok, "--cluster-cidr=")
 		case tok == "--service-cidr" && i+1 < len(tokens):
-			serviceCIDR = tokens[i+1]
+			serviceCIDR = unquoteShellToken(tokens[i+1])
 		case strings.HasPrefix(tok, "--service-cidr="):
 			serviceCIDR = strings.TrimPrefix(tok, "--service-cidr=")
 		}
 	}
 	dualStack = strings.Contains(clusterCIDR, ",")
 	return clusterCIDR, serviceCIDR, dualStack
+}
+
+// unquoteShellToken removes one layer of single quoting as written by the k3s
+// install script's quote() helper: it wraps each argument in single quotes and
+// escapes an embedded single quote with the POSIX backslash-quote sequence.
+// Tokens that are not single-quoted are returned unchanged. It assumes arg
+// values contain no whitespace (true for all forge k3s flags: CIDRs, addresses,
+// labels, taints), so strings.Fields never splits a quoted value across tokens.
+func unquoteShellToken(tok string) string {
+	if len(tok) < 2 || tok[0] != '\'' || tok[len(tok)-1] != '\'' {
+		return tok
+	}
+	inner := tok[1 : len(tok)-1]
+	return strings.ReplaceAll(inner, "'\\''", "'")
 }
 
 func expandPath(p string) string {
