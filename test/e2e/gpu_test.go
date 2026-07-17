@@ -316,9 +316,17 @@ func sshRun(t *testing.T, ip, keyPath, cmd string) (string, error) {
 func dumpGPUDiagnostics(t *testing.T, ip, keyPath string) {
 	t.Helper()
 	t.Log("=== GPU diagnostics ===")
+	// Ordered most-diagnostic-first for a ClusterPolicy stall: the describe
+	// shows per-component state (driver/toolkit/devicePlugin/...) with the
+	// message of whichever component is NotReady, and the driver DaemonSet
+	// logs hold the kernel-module compile output (the usual slow/stuck path).
 	cmds := []string{
 		"sudo k3s kubectl get clusterpolicy -o jsonpath='{range .items[*]}{.metadata.name}: state={.status.state}{\"\\n\"}{end}'",
+		"sudo k3s kubectl describe clusterpolicy",
 		"sudo k3s kubectl get pods -n gpu-operator -o wide",
+		"sudo k3s kubectl get ds -n gpu-operator -o wide",
+		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-driver-daemonset --tail=100 --all-containers=true",
+		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-driver-daemonset --previous --tail=100 --all-containers=true",
 		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-container-toolkit-daemonset --tail=100 --all-containers=true",
 		"echo '--- k3s containerd config: nvidia/cdi entries? ---'; sudo grep -iE 'nvidia|cdi|runtime' /var/lib/rancher/k3s/agent/etc/containerd/config.toml 2>/dev/null || echo 'no k3s containerd config or no nvidia/cdi entries'",
 		"echo '--- /etc/containerd ---'; sudo ls /etc/containerd/ 2>/dev/null || echo 'no /etc/containerd'",
