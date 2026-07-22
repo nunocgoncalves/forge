@@ -87,6 +87,35 @@ func (c *Cluster) HelmInstall(t *testing.T, release, chartRef, version, namespac
 	run(t, "helm", args...)
 }
 
+// HelmUpgrade runs `helm upgrade --install` WITHOUT --wait. Use when post-
+// install hooks must run before the workloads they provision can be Ready —
+// e.g. cert-manager leaf certs mounted by pods: `helm --wait` would deadlock
+// waiting for pods that need the hook-issued Secrets. The caller polls
+// readiness afterward (kubectl wait / rollout status). Same chart/value
+// resolution as HelmInstall.
+func (c *Cluster) HelmUpgrade(t *testing.T, release, chartRef, version, namespace, localChart string, values map[string]string) {
+	t.Helper()
+	mustBin(t, "helm")
+	args := []string{
+		"upgrade", "--install", release,
+		"--namespace", namespace,
+		"--kubeconfig", c.Kubeconfig,
+		"--timeout", "10m",
+	}
+	if localChart != "" {
+		args = append(args, localChart)
+	} else {
+		args = append(args, chartRef)
+		if version != "" {
+			args = append(args, "--version", version)
+		}
+	}
+	for k, v := range values {
+		args = append(args, "--set", k+"="+v)
+	}
+	run(t, "helm", args...)
+}
+
 // Kubectl runs kubectl against the cluster and returns combined stdout.
 func (c *Cluster) Kubectl(t *testing.T, args ...string) string {
 	t.Helper()

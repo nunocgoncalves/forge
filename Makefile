@@ -44,6 +44,9 @@ test-e2e-controlplane:
 test-e2e-gpu:
 	cd test/e2e && go test -race -count=1 -timeout 45m -run '^TestGPUE2E$$' .
 
+test-e2e-internal-tls:
+	cd test/e2e && go test -race -count=1 -timeout 20m -run '^TestInternalTLS$$' .
+
 test-e2e-inference:
 	cd test/e2e && go test -race -count=1 -timeout 15m -run '^TestInferenceFlowContract$$' .
 
