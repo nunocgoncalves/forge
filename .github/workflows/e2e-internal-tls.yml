@@ -1,0 +1,49 @@
+name: e2e-internal-tls
+
+on:
+  # Not on pull_request: this e2e auto-resolves the latest PUBLISHED
+  # iterabase-platform chart, which only supports global.internalTLS once HOR-371
+  # (iterabase-charts#30) merges + umbrella 0.1.23 ships. Run nightly + on
+  # dispatch; flip to pull_request (paths: test/e2e/**) once 0.1.23 is released.
+  schedule:
+    # Nightly 06:00 UTC — exercises internal TLS off the private CA on the
+    # latest iterabase-platform release. Staggered off the cert-issuers nightly (05:00).
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-internal-tls-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  internal-tls-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+
+      - name: install kind + helm + kubectl
+        run: |
+          curl -sSL -o /tmp/kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+          curl -sSL https://get.helm.sh/helm-v3.18.0-linux-amd64.tar.gz | tar -xz -C /tmp
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          curl -sSL -o /tmp/kubectl "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+
+      # Deploys the iterabase-platform umbrella with global.internalTLS.enabled to
+      # Kind (two-phase: plaintext --wait, then TLS-on upgrade) and asserts the
+      # internal CA + leaf certs issue, the gateway /readyz is 200 (Postgres
+      # verify-full + Redis TLS), and the control-plane api serves HTTPS verified
+      # against the internal CA. The chart version is auto-resolved to the latest
+      # stable release.
+      - name: internal-tls e2e
+        run: make test-e2e-internal-tls
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
