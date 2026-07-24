@@ -116,6 +116,26 @@ func (c *Cluster) Kubectl(t *testing.T, args ...string) string {
 	return run(t, "kubectl", full...)
 }
 
+// Exec runs `kubectl exec` in a pod and returns the combined output and the
+// command error. It does NOT fatal on a non-zero exit — callers assert on both,
+// e.g. when a probe is expected to be rejected (a plaintext attempt against a
+// TLS-only server). container may be "" for the default container. The command
+// runs via `sh -c` so shell expansion (env vars, quoting) is available.
+func (c *Cluster) Exec(t *testing.T, namespace, pod, container, command string) (string, error) {
+	t.Helper()
+	mustBin(t, "kubectl")
+	args := []string{"--kubeconfig", c.Kubeconfig, "exec", "-n", namespace}
+	if container != "" {
+		args = append(args, "-c", container)
+	}
+	args = append(args, pod, "--", "sh", "-c", command)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // FirstPodName returns the name of the first pod matching a label selector
 // (e.g. "app.kubernetes.io/component=api"), polling briefly until one exists.
 func (c *Cluster) FirstPodName(t *testing.T, namespace, selector string) string {
