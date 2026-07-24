@@ -60,31 +60,13 @@ func (c *Cluster) LoadImage(t *testing.T, image string) {
 	run(t, "kind", "load", "docker-image", "--name", c.Name, image)
 }
 
-// HelmInstall runs `helm upgrade --install` and waits for resources to be ready.
-// If localChart is non-empty it is used as the chart path (dev against a
-// checkout); otherwise chartRef is used (an OCI ref or repo/name) with --version.
-// values is a flat map of --set key=value pairs.
+// HelmInstall runs `helm upgrade --install` with --wait (blocks until the
+// release's resources are Ready). If localChart is non-empty it is used as the
+// chart path (dev against a checkout); otherwise chartRef is used (an OCI ref or
+// repo/name) with --version. values is a flat map of --set key=value pairs.
 func (c *Cluster) HelmInstall(t *testing.T, release, chartRef, version, namespace, localChart string, values map[string]string) {
-	t.Helper()
-	mustBin(t, "helm")
-	args := []string{
-		"upgrade", "--install", release,
-		"--namespace", namespace, "--create-namespace",
-		"--kubeconfig", c.Kubeconfig,
-		"--wait", "--timeout", "5m",
-	}
-	if localChart != "" {
-		args = append(args, localChart)
-	} else {
-		args = append(args, chartRef)
-		if version != "" {
-			args = append(args, "--version", version)
-		}
-	}
-	for k, v := range values {
-		args = append(args, "--set", k+"="+v)
-	}
-	run(t, "helm", args...)
+	c.helmUpgrade(t, release, chartRef, version, namespace, localChart, values,
+		"--create-namespace", "--wait", "--timeout", "5m")
 }
 
 // HelmUpgrade runs `helm upgrade --install` WITHOUT --wait. Use when post-
@@ -94,14 +76,24 @@ func (c *Cluster) HelmInstall(t *testing.T, release, chartRef, version, namespac
 // readiness afterward (kubectl wait / rollout status). Same chart/value
 // resolution as HelmInstall.
 func (c *Cluster) HelmUpgrade(t *testing.T, release, chartRef, version, namespace, localChart string, values map[string]string) {
+	c.helmUpgrade(t, release, chartRef, version, namespace, localChart, values,
+		"--timeout", "10m")
+}
+
+// helmUpgrade is the shared builder behind HelmInstall / HelmUpgrade: it
+// resolves the chart (local path vs OCI/repo ref + optional --version), expands
+// the --set values, and runs `helm upgrade --install`. opts carries only the
+// wait/create-namespace/timeout flags that differ between the two callers, so
+// the chart-resolution logic cannot drift between the install and upgrade paths.
+func (c *Cluster) helmUpgrade(t *testing.T, release, chartRef, version, namespace, localChart string, values map[string]string, opts ...string) {
 	t.Helper()
 	mustBin(t, "helm")
 	args := []string{
 		"upgrade", "--install", release,
 		"--namespace", namespace,
 		"--kubeconfig", c.Kubeconfig,
-		"--timeout", "10m",
 	}
+	args = append(args, opts...)
 	if localChart != "" {
 		args = append(args, localChart)
 	} else {

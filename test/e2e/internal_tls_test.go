@@ -77,6 +77,21 @@ func TestInternalTLS(t *testing.T) {
 	c.Kubectl(t, "wait", "--for=jsonpath={.status.conditions[?(@.type==\"Ready\")].status}=True",
 		"certificate", "-n", namespace, "--all", "--timeout=180s")
 
+	// Assert the concrete required leaf certs exist (not just that whatever certs
+	// exist are Ready): with internal TLS on, postgresql, redis, and the
+	// control-plane api must each have an issued Certificate. Matched by name
+	// substring so this stays tolerant to the chart's release-prefixed names — a
+	// regression that renders certs but drops one component's cert fails loudly
+	// here instead of silently passing on an unrelated Ready cert.
+	certNames := c.Kubectl(t, "get", "certificates", "-n", namespace,
+		"-o", "jsonpath={.items[*].metadata.name}")
+	for _, component := range []string{"postgres", "redis", "control-plane"} {
+		if !strings.Contains(certNames, component) {
+			t.Fatalf("internal TLS on but no Certificate found for %q (certs: %s)", component, certNames)
+		}
+	}
+	t.Logf("required leaf certs present + Ready: %s", certNames)
+
 	// 5. Gateway pod Ready. Its startup rdb.Ping proves Redis TLS (rediss:// +
 	//    the mounted CA); Available implies the snapshot (Postgres verify-full)
 	//    is fresh. kubectl fatals (with the rollout message) on timeout.
