@@ -190,7 +190,7 @@ func TestGPUE2E(t *testing.T) {
 	cfgPath := writeForgeConfigGPU(t, runID, vm.IP, privKeyPath)
 	out, applyErr := runForgeAllowFail(t, forgeBin, forgeHome, "apply", "--config", cfgPath)
 	if applyErr != nil || !strings.Contains(out, "gpu ready: true") {
-		dumpGPUDiagnostics(t, vm.IP, privKeyPath)
+		dumpGPUDiagnostics(t, vm.IP, privKeyPath, filepath.Join(forgeHome, runID, "kubeconfig.yaml"))
 		t.Fatalf("forge apply did not reach gpu ready:\n%s\nerr=%v", out, applyErr)
 	}
 	t.Logf("apply output:\n%s", out)
@@ -310,34 +310,79 @@ func sshRun(t *testing.T, ip, keyPath, cmd string) (string, error) {
 	return string(out), err
 }
 
-// dumpGPUDiagnostics queries the GPU operator state on the droplet when the
-// readiness gate fails, so the cause (driver/toolkit/device-plugin/validator)
-// is visible in the test log rather than just "gpu not ready after 15m".
-func dumpGPUDiagnostics(t *testing.T, ip, keyPath string) {
+// dumpGPUDiagnostics queries the GPU operator state when the readiness gate
+// fails, so the cause (driver/toolkit/device-plugin/validator) is visible in
+// the test log rather than just "gpu not ready after 15m".
+//
+// k8s commands prefer the off-host kubeconfig (kubectl from the test runner →
+// k3s API server) over SSH (sudo k3s kubectl on the VM). When the GPU-operator
+// stall starves the VM, sshd resets handshakes under memory pressure — but the
+// k3s API server keeps serving, so the kubeconfig path captures the
+// clusterpolicy state + cuda-validation logs that SSH misses. Host-level
+// commands (containerd config) still use SSH (they inspect the VM filesystem).
+func dumpGPUDiagnostics(t *testing.T, ip, keyPath, kcPath string) {
 	t.Helper()
 	t.Log("=== GPU diagnostics ===")
-	// Ordered most-diagnostic-first for a ClusterPolicy stall: the describe
-	// shows per-component state (driver/toolkit/devicePlugin/...) with the
-	// message of whichever component is NotReady. In practice the stall is the
-	// operator-validator cuda-validation container crash-looping (state-
-	// operator-validation), so its describe + logs come before the driver/toolkit
-	// ds logs (the driver compile is rarely the culprit).
-	cmds := []string{
-		"sudo k3s kubectl get clusterpolicy -o jsonpath='{range .items[*]}{.metadata.name}: state={.status.state}{\"\\n\"}{end}'",
-		"sudo k3s kubectl describe clusterpolicy",
-		"sudo k3s kubectl get pods -n gpu-operator -o wide",
-		"sudo k3s kubectl get ds -n gpu-operator -o wide",
-		"sudo k3s kubectl describe pod -n gpu-operator -l app=nvidia-operator-validator",
-		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-operator-validator -c cuda-validation --tail=100",
-		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-operator-validator -c cuda-validation --previous --tail=100",
-		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-driver-daemonset --tail=100 --all-containers=true",
-		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-driver-daemonset --previous --tail=100 --all-containers=true",
-		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-container-toolkit-daemonset --tail=100 --all-containers=true",
+
+	useKC := kcPath != ""
+	if useKC {
+		if _, err := os.Stat(kcPath); err != nil {
+			useKC = false
+			t.Logf("off-host kubeconfig not found at %s; falling back to SSH (may fail if VM is starved)", kcPath)
+		}
+	}
+	// kcKubectl runs kubectl from the test runner against the off-host kubeconfig.
+	// 30s per command: enough for a responsive API server; if it times out the
+	// VM is hanging and we move on rather than blocking the test for 15m/cmd.
+	kcKubectl := func(args ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		full := append([]string{"--kubeconfig", kcPath}, args...)
+		out, err := exec.CommandContext(ctx, "kubectl", full...).CombinedOutput()
+		return string(out), err
+	}
+
+	// Ordered most-diagnostic-first for a ClusterPolicy stall. Each entry has
+	// the kubectl args (for the kubeconfig path) + the equivalent SSH command
+	// (fallback). The describe shows per-component state; the validator
+	// cuda-validation logs are the usual culprit (state-operator-validation).
+	type k8sCmd struct {
+		args []string
+		ssh  string
+	}
+	k8sCmds := []k8sCmd{
+		{[]string{"get", "clusterpolicy", "-o", `jsonpath={range .items[*]}{.metadata.name}: state={.status.state}{"\n"}{end}`},
+			`sudo k3s kubectl get clusterpolicy -o jsonpath='{range .items[*]}{.metadata.name}: state={.status.state}{"\n"}{end}'`},
+		{[]string{"describe", "clusterpolicy"}, "sudo k3s kubectl describe clusterpolicy"},
+		{[]string{"get", "pods", "-n", "gpu-operator", "-o", "wide"}, "sudo k3s kubectl get pods -n gpu-operator -o wide"},
+		{[]string{"get", "ds", "-n", "gpu-operator", "-o", "wide"}, "sudo k3s kubectl get ds -n gpu-operator -o wide"},
+		{[]string{"describe", "pod", "-n", "gpu-operator", "-l", "app=nvidia-operator-validator"}, "sudo k3s kubectl describe pod -n gpu-operator -l app=nvidia-operator-validator"},
+		{[]string{"logs", "-n", "gpu-operator", "ds/nvidia-operator-validator", "-c", "cuda-validation", "--tail=100"}, "sudo k3s kubectl logs -n gpu-operator ds/nvidia-operator-validator -c cuda-validation --tail=100"},
+		{[]string{"logs", "-n", "gpu-operator", "ds/nvidia-operator-validator", "-c", "cuda-validation", "--previous", "--tail=100"}, "sudo k3s kubectl logs -n gpu-operator ds/nvidia-operator-validator -c cuda-validation --previous --tail=100"},
+		{[]string{"logs", "-n", "gpu-operator", "ds/nvidia-driver-daemonset", "--tail=100", "--all-containers=true"}, "sudo k3s kubectl logs -n gpu-operator ds/nvidia-driver-daemonset --tail=100 --all-containers=true"},
+		{[]string{"logs", "-n", "gpu-operator", "ds/nvidia-driver-daemonset", "--previous", "--tail=100", "--all-containers=true"}, "sudo k3s kubectl logs -n gpu-operator ds/nvidia-driver-daemonset --previous --tail=100 --all-containers=true"},
+		{[]string{"logs", "-n", "gpu-operator", "ds/nvidia-container-toolkit-daemonset", "--tail=100", "--all-containers=true"}, "sudo k3s kubectl logs -n gpu-operator ds/nvidia-container-toolkit-daemonset --tail=100 --all-containers=true"},
+		{[]string{"get", "events", "-n", "gpu-operator", "--sort-by=.lastTimestamp"}, "sudo k3s kubectl get events -n gpu-operator --sort-by=.lastTimestamp | tail -15"},
+	}
+	for _, c := range k8sCmds {
+		var out string
+		var err error
+		desc := strings.Join(c.args, " ")
+		if useKC {
+			out, err = kcKubectl(c.args...)
+		} else {
+			out, err = sshRun(t, ip, keyPath, c.ssh)
+			desc = c.ssh
+		}
+		t.Logf("$ kubectl %s\n%s(err=%v)", desc, out, err)
+	}
+
+	// Host-level commands (SSH only — inspect the VM filesystem, not k8s).
+	hostCmds := []string{
 		"echo '--- k3s containerd config: nvidia/cdi entries? ---'; sudo grep -iE 'nvidia|cdi|runtime' /var/lib/rancher/k3s/agent/etc/containerd/config.toml 2>/dev/null || echo 'no k3s containerd config or no nvidia/cdi entries'",
 		"echo '--- /etc/containerd ---'; sudo ls /etc/containerd/ 2>/dev/null || echo 'no /etc/containerd'",
-		"sudo k3s kubectl get events -n gpu-operator --sort-by=.lastTimestamp | tail -15",
 	}
-	for _, c := range cmds {
+	for _, c := range hostCmds {
 		out, err := sshRun(t, ip, keyPath, c)
 		t.Logf("$ %s\n%s(err=%v)", c, out, err)
 	}

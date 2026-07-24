@@ -53,14 +53,15 @@ func TestInferenceFlowGPU(t *testing.T) {
 	}
 	require.NoError(t, err)
 	defer func() { _ = prov.Destroy(ctx, vm.ID) }()
+	forgeHome := t.TempDir()
 	// On any failure — including applyWithRetry's t.Fatalf on a helm --wait
 	// timeout — dump GPU-operator state before the droplet is torn down.
 	// Registered after the Destroy defer so it runs first (LIFO); without it a
-	// ClusterPolicy stall leaves no pod/clusterpolicy evidence. Mirrors the
-	// shared TestE2E helper's on-failure dump.
+	// ClusterPolicy stall leaves no pod/clusterpolicy evidence. Uses the
+	// off-host kubeconfig (robust to VM starvation — see dumpGPUDiagnostics).
 	defer func() {
 		if t.Failed() {
-			dumpGPUDiagnostics(t, vm.IP, privKeyPath)
+			dumpGPUDiagnostics(t, vm.IP, privKeyPath, filepath.Join(forgeHome, runID, "kubeconfig.yaml"))
 		}
 	}()
 	t.Logf("gpu vm ip %s", vm.IP)
@@ -73,7 +74,6 @@ func TestInferenceFlowGPU(t *testing.T) {
 		chartVersion = kindtest.LatestChartVersion(t, "iterabase-platform")
 	}
 	forgeBin := buildForge(t)
-	forgeHome := t.TempDir()
 	cfgPath := writeForgeConfigInferenceGPU(t, runID, vm.IP, privKeyPath, chartVersion)
 	out := applyWithRetry(t, forgeBin, forgeHome, cfgPath)
 	if !strings.Contains(out, "gpu ready: true") {
