@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -27,6 +28,12 @@ import (
 //	  -> gateway /readyz 200 over port-forward (snapshot fresh -> Postgres verify-full)
 //	  -> control-plane api /healthz 200 over HTTPS (TLS client trusting the CA;
 //	     the api cert SAN includes localhost for the port-forward)
+//	  -> live transport proofs (not just readiness): the gateway's rendered
+//	     DATABASE_URL/REDIS_URL carry sslmode=verify-full + rediss://; a
+//	     plaintext Redis/Postgres attempt is rejected; an unauthenticated
+//	     Redis TLS attempt gets NOAUTH; a verified-full Postgres TLS select
+//	     succeeds. A regression that renders certs but leaves a link plaintext
+//	     fails one of these, not just readiness.
 //
 // This is the forge e2e home for HOR-371's internal-TLS validation, mirroring
 // TestCertIssuers / TestControlPlaneIdentity (the static render check stays in
@@ -134,4 +141,77 @@ func TestInternalTLS(t *testing.T) {
 		t.Fatalf("control-plane api HTTPS /healthz: status %d (want 200)", resp.StatusCode)
 	}
 	t.Logf("control-plane api HTTPS /healthz 200 — verified against the internal CA")
+
+	// 8. Gateway is configured for TLS, not just running: inspect its rendered
+	//    DATABASE_URL / REDIS_URL env and assert sslmode=verify-full + rediss://.
+	//    This is the direct proof of HOR-371 scope items 2 & 3 (connection strings
+	//    set sslmode=require-or-stronger; gateway connects with rediss://).
+	//    Readiness alone can't distinguish a rediss:// gateway from a plaintext
+	//    one; the rendered config can.
+	gwPod := c.FirstPodName(t, namespace, "app.kubernetes.io/name=inference-gateway")
+	envOut, _ := c.Exec(t, namespace, gwPod, "", "printenv DATABASE_URL REDIS_URL REDIS_TLS_CA_FILE")
+	if !strings.Contains(envOut, "sslmode=verify-full") || !strings.Contains(envOut, "sslrootcert=") {
+		t.Errorf("gateway DATABASE_URL not configured for verify-full TLS:\n%s", envOut)
+	}
+	if !strings.Contains(envOut, "rediss://") {
+		t.Errorf("gateway REDIS_URL not configured for rediss://:\n%s", envOut)
+	}
+	t.Logf("gateway rendered TLS config OK (verify-full + rediss://)")
+
+	// 9. Redis live transport: prove the server speaks TLS only and requires
+	//    AUTH. Run redis-cli from the redis pod (it ships redis-cli; its own
+	//    readiness probe uses it) against the redis Service DNS. With internalTLS
+	//    the chart starts redis-server with --tls-port 6379 --port 0 (plaintext
+	//    disabled) + --requirepass, so:
+	//      - a plaintext PING is rejected (no RESP on a TLS-only port)
+	//      - a TLS PING without auth gets NOAUTH
+	//      - a TLS PING with the chart-generated password gets PONG
+	//    --insecure skips cert verification (the CA isn't mounted in the server
+	//    pod) — it still proves TLS is negotiated, which is the transport claim.
+	redisHost := release + "-redis"
+	redisPod := c.FirstPodName(t, namespace, "app.kubernetes.io/name=redis")
+	redisPW := getSecretKey(t, c, namespace, release+"-redis", "redis-password")
+
+	plainOut, plainErr := c.Exec(t, namespace, redisPod, "",
+		fmt.Sprintf("redis-cli -h %s -p 6379 PING", redisHost))
+	if plainErr == nil && strings.Contains(plainOut, "PONG") {
+		t.Errorf("redis plaintext PING succeeded (want TLS-only rejection): %s", plainOut)
+	}
+
+	noauthOut, _ := c.Exec(t, namespace, redisPod, "",
+		fmt.Sprintf("redis-cli --tls --insecure -h %s -p 6379 PING", redisHost))
+	if !strings.Contains(noauthOut, "NOAUTH") {
+		t.Errorf("redis TLS PING without auth: want NOAUTH, got: %s", noauthOut)
+	}
+
+	authedOut, authedErr := c.Exec(t, namespace, redisPod, "",
+		fmt.Sprintf("redis-cli --tls --insecure -h %s -p 6379 -a %q PING", redisHost, redisPW))
+	if authedErr != nil || !strings.Contains(authedOut, "PONG") {
+		t.Errorf("redis TLS PING with auth: want PONG, got (err=%v): %s", authedErr, authedOut)
+	}
+	t.Logf("redis live transport OK: plaintext rejected, TLS no-auth -> NOAUTH, TLS+auth -> PONG")
+
+	// 10. Postgres live transport: prove the server requires TLS. The chart runs
+	//     postgres with ssl=on + a pg_hba that is `hostssl ... scram-sha-256` /
+	//     `host ... reject`, so a sslmode=disable connection is rejected and a
+	//     sslmode=verify-full connection (trusting the leaf Secret's ca.crt, which
+	//     cert-manager populates) succeeds. Run psql from the postgres pod (it
+	//     ships psql) against the postgres Service DNS, using the pod's own
+	//     POSTGRES_USER/DB/PASSWORD env so this is independent of the exact db.
+	pgHost := release + "-postgresql"
+	pgPod := c.FirstPodName(t, namespace, "app.kubernetes.io/name=postgresql")
+	const pgCA = "/var/lib/postgresql/tls/ca.crt"
+
+	pgPlainOut, pgPlainErr := c.Exec(t, namespace, pgPod, "",
+		fmt.Sprintf(`psql "host=%s port=5432 user=$POSTGRES_USER dbname=$POSTGRES_DB sslmode=disable connect_timeout=5" -c "select 1"`, pgHost))
+	if pgPlainErr == nil && !strings.Contains(strings.ToLower(pgPlainOut), "fatal") && !strings.Contains(strings.ToLower(pgPlainOut), "error") {
+		t.Errorf("postgres plaintext select succeeded (want pg_hba rejection): %s", pgPlainOut)
+	}
+
+	pgTLSOut, pgTLSErr := c.Exec(t, namespace, pgPod, "",
+		fmt.Sprintf(`psql "host=%s port=5432 user=$POSTGRES_USER dbname=$POSTGRES_DB password=$POSTGRES_PASSWORD sslmode=verify-full sslrootcert=%s connect_timeout=5" -c "select 1"`, pgHost, pgCA))
+	if pgTLSErr != nil || !strings.Contains(pgTLSOut, "(1 row)") {
+		t.Errorf("postgres verify-full select failed (want 1 row, err=%v): %s", pgTLSErr, pgTLSOut)
+	}
+	t.Logf("postgres live transport OK: plaintext rejected, verify-full select -> 1 row")
 }
