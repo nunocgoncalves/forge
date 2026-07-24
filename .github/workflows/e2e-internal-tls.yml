@@ -1,10 +1,10 @@
 name: e2e-internal-tls
 
 on:
-  # Not on pull_request: this e2e auto-resolves the latest PUBLISHED
-  # iterabase-platform chart, which only supports global.internalTLS once HOR-371
-  # (iterabase-charts#30) merges + umbrella 0.1.23 ships. Run nightly + on
-  # dispatch; flip to pull_request (paths: test/e2e/**) once 0.1.23 is released.
+  pull_request:
+    paths:
+      - "test/e2e/**"
+      - ".github/workflows/e2e-internal-tls.yml"
   schedule:
     # Nightly 06:00 UTC — exercises internal TLS off the private CA on the
     # latest iterabase-platform release. Staggered off the cert-issuers nightly (05:00).
@@ -40,9 +40,11 @@ jobs:
       # Deploys the iterabase-platform umbrella with global.internalTLS.enabled to
       # Kind (two-phase: plaintext --wait, then TLS-on upgrade) and asserts the
       # internal CA + leaf certs issue, the gateway /readyz is 200 (Postgres
-      # verify-full + Redis TLS), and the control-plane api serves HTTPS verified
-      # against the internal CA. The chart version is auto-resolved to the latest
-      # stable release.
+      # verify-full + Redis TLS), the control-plane api serves HTTPS verified
+      # against the internal CA, and the live transport properties hold
+      # (gateway rendered verify-full + rediss://; plaintext PG/Redis rejected;
+      # Redis NOAUTH; Postgres verify-full select). The chart version is
+      # auto-resolved to the latest stable release.
       - name: internal-tls e2e
         run: make test-e2e-internal-tls
         env:

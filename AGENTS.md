@@ -8,6 +8,7 @@
 - Commit to the ticket branch as work progresses and as commits make sense.
 - When work is ready for review, open a pull request; do not merge it yourself.
 - After pushing a branch or opening a PR, watch the CI/CD workflows to completion (`gh run watch <run-id>` or the Actions tab) and stay in the iteration loop: if a workflow fails, triage and push a fix promptly. The work is not handed off until CI is green or the failure is understood.
+- A pull request is not considered addressable-complete (review addressed, ready to merge) until CI is green on the PR's branch. After pushing changes that should resolve review findings or CI failures, re-check that CI passes before declaring the work done or asking the user to merge; if CI is red, fix it before finishing. Never mark a review round or a ticket complete while CI is failing.
 - Pull request descriptions must be valid Markdown with real line breaks, not escaped `\n` text; when using `gh`, write the body to a file and use `--body-file` for both create/edit operations.
 - Pull request descriptions should use this structure: `## Summary`, `## Validation`, `## Production impact`, and `## Ticket state`; include concise bullets under each heading and mark non-applicable sections as `None` or `N/A`.
 - Only the user may approve and merge pull requests to `master`.
