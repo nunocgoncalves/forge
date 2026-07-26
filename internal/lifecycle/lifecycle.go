@@ -422,8 +422,11 @@ func waitForGPU(ctx context.Context, p provisioner.Provisioner, opts ApplyOpts) 
 // gpuOperatorValues returns the forge-internal, prod-ready Helm --set values for
 // the NVIDIA GPU Operator. These mirror the chart's defaults and are set
 // explicitly so forge's intent is pinned against chart default changes; advanced
-// overrides are a fast-follow. CDI is enabled so workloads request
-// nvidia.com/gpu with no runtimeClassName.
+// overrides are a fast-follow. CDI is DISABLED (HOR-377): on k3s the CDI device
+// registration is unreliable — the cuda-validator's CUDA workload fails with
+// cudaErrorSystemNotReady ("system not yet initialized") because the CDI
+// devices/libs aren't injected. The legacy nvidia-container-runtime injection
+// (NVIDIA_VISIBLE_DEVICES) is more battle-tested and doesn't depend on CDI.
 //
 // k3s containerd: the operator does not auto-detect k3s, so the toolkit must be
 // pointed at k3s's containerd config + socket via toolkit.env (the operator
@@ -438,7 +441,7 @@ func waitForGPU(ctx context.Context, p provisioner.Provisioner, opts ApplyOpts) 
 // fallback — record it for HOR-306 (ModelBackend vLLM pod spec).
 func gpuOperatorValues() []string {
 	return []string{
-		"cdi.enabled=true",
+		"cdi.enabled=false",
 		"driver.enabled=true",
 		"toolkit.enabled=true",
 		"devicePlugin.enabled=true",

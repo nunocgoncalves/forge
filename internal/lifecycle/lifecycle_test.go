@@ -484,7 +484,7 @@ func TestApply_GPU(t *testing.T) {
 	assert.Equal(t, "v26.3.3", op.version)
 	assert.Equal(t, "gpu-operator", op.namespace)
 	assert.Equal(t, []string{
-		"cdi.enabled=true",
+		"cdi.enabled=false",
 		"driver.enabled=true",
 		"toolkit.enabled=true",
 		"devicePlugin.enabled=true",
