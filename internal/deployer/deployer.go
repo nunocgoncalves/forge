@@ -7,7 +7,10 @@
 // logic never talks to SSH, helm, or kubectl directly.
 package deployer
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // ChartState is the reconciled state of the platform chart release, read for
 // status reporting. A release that does not exist is {Installed: false}.
@@ -19,12 +22,13 @@ type ChartState struct {
 
 // ApplyOpts configures a Helm release install/upgrade (helm upgrade --install).
 type ApplyOpts struct {
-	Release    string   // helm release name
-	Repository string   // chart ref (OCI URL, e.g. oci://.../iterabase-platform, or repo/name)
-	Version    string   // chart version (semver)
-	Namespace  string   // target namespace (--create-namespace)
-	Values     []string // --set inline values (e.g. GPU operator overrides)
-	ValueFiles []string // -f value files, applied in order (later wins); overlay values
+	Release    string        // helm release name
+	Repository string        // chart ref (OCI URL, e.g. oci://.../iterabase-platform, or repo/name)
+	Version    string        // chart version (semver)
+	Namespace  string        // target namespace (--create-namespace)
+	Values     []string      // --set inline values (e.g. GPU operator overrides)
+	ValueFiles []string      // -f value files, applied in order (later wins); overlay values
+	Timeout    time.Duration // helm --wait --timeout; zero => 10m default. The GPU operator needs longer (cuda-validation retries).
 }
 
 // Deployer abstracts cluster-level manifest operations (Helm + kustomize). One

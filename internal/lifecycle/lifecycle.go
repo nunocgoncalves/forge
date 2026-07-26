@@ -377,6 +377,7 @@ func applyGPU(ctx context.Context, cfg *config.Cluster, p provisioner.Provisione
 		Version:    g.Version,
 		Namespace:  g.Namespace,
 		Values:     gpuOperatorValues(),
+		Timeout:    20 * time.Minute, // GPU operator: cuda-validation retries need longer than the 10m default (HOR-377)
 	}); err != nil {
 		auditFail(cfg, "apply-gpu", err)
 		return fmt.Errorf("gpu operator: %w", err)

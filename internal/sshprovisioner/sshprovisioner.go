@@ -420,12 +420,16 @@ func (p *SSHProvisioner) Apply(ctx context.Context, opts deployer.ApplyOpts) err
 	if err := p.ensureHelm(ctx); err != nil {
 		return err
 	}
+	timeout := opts.Timeout
+	if timeout == 0 {
+		timeout = 10 * time.Minute
+	}
 	args := []string{"upgrade", "--install", opts.Release, opts.Repository,
 		"--version", opts.Version,
 		"-n", opts.Namespace,
 		"--create-namespace",
 		"--wait",
-		"--timeout", "10m",
+		"--timeout", timeout.String(),
 	}
 	for _, f := range opts.ValueFiles {
 		args = append(args, "-f", f)

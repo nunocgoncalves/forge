@@ -461,6 +461,31 @@ func TestDeployer_Apply(t *testing.T) {
 	assert.Contains(t, got, "toolkit.enabled=true")
 }
 
+func TestDeployer_Apply_CustomTimeout(t *testing.T) {
+	var got string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v helm":
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "upgrade"):
+			got = cmd
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.Apply(context.Background(), deployer.ApplyOpts{
+		Release: "gpu-operator", Repository: "nvidia/gpu-operator",
+		Version: "v26.3.3", Namespace: "gpu-operator",
+		Timeout: 20 * time.Minute,
+	}))
+	assert.Contains(t, got, "20m0s", "custom timeout must be passed to helm --timeout")
+	assert.NotContains(t, got, "10m0s", "default timeout must not appear when a custom one is set")
+}
+
 func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
