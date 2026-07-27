@@ -30,7 +30,7 @@ import (
 //	     the api cert SAN includes localhost for the port-forward)
 //	  -> live transport proofs (not just readiness): the gateway's rendered
 //	     DATABASE_URL/REDIS_URL carry sslmode=verify-full + rediss://; a
-//	     plaintext Redis/Postgres attempt is rejected; an unauthenticated
+//	     authenticated plaintext Redis/Postgres attempt is rejected; an unauthenticated
 //	     Redis TLS attempt gets NOAUTH; a verified-full Postgres TLS select
 //	     succeeds. A regression that renders certs but leaves a link plaintext
 //	     fails one of these, not just readiness.
@@ -163,7 +163,8 @@ func TestInternalTLS(t *testing.T) {
 	//    readiness probe uses it) against the redis Service DNS. With internalTLS
 	//    the chart starts redis-server with --tls-port 6379 --port 0 (plaintext
 	//    disabled) + --requirepass, so:
-	//      - a plaintext PING is rejected (no RESP on a TLS-only port)
+	//      - an authenticated plaintext PING is rejected (no RESP on a TLS-only
+	//        port; valid creds means rejection is transport, not a missing-auth artifact)
 	//      - a TLS PING without auth gets NOAUTH
 	//      - a TLS PING with the chart-generated password gets PONG
 	//    --insecure skips cert verification (the CA isn't mounted in the server
@@ -172,10 +173,14 @@ func TestInternalTLS(t *testing.T) {
 	redisPod := c.FirstPodName(t, namespace, "app.kubernetes.io/name=redis")
 	redisPW := getSecretKey(t, c, namespace, release+"-redis", "redis-password")
 
+	// Pass the chart password so a NOAUTH response can't mask an accidentally
+	// enabled plaintext transport: with TLS-only (--port 0) the server won't
+	// negotiate RESP and the PING errors out; only a real plaintext regression
+	// returns PONG here.
 	plainOut, plainErr := c.Exec(t, namespace, redisPod, "",
-		fmt.Sprintf("redis-cli -h %s -p 6379 PING", redisHost))
+		fmt.Sprintf("redis-cli -h %s -p 6379 -a %q PING", redisHost, redisPW))
 	if plainErr == nil && strings.Contains(plainOut, "PONG") {
-		t.Errorf("redis plaintext PING succeeded (want TLS-only rejection): %s", plainOut)
+		t.Errorf("redis authenticated plaintext PING succeeded (want TLS-only rejection): %s", plainOut)
 	}
 
 	noauthOut, _ := c.Exec(t, namespace, redisPod, "",
@@ -193,19 +198,22 @@ func TestInternalTLS(t *testing.T) {
 
 	// 10. Postgres live transport: prove the server requires TLS. The chart runs
 	//     postgres with ssl=on + a pg_hba that is `hostssl ... scram-sha-256` /
-	//     `host ... reject`, so a sslmode=disable connection is rejected and a
-	//     sslmode=verify-full connection (trusting the leaf Secret's ca.crt, which
-	//     cert-manager populates) succeeds. Run psql from the postgres pod (it
-	//     ships psql) against the postgres Service DNS, using the pod's own
-	//     POSTGRES_USER/DB/PASSWORD env so this is independent of the exact db.
+	//     `host ... reject`, so a sslmode=disable connection is rejected even with
+	//     valid credentials, and a sslmode=verify-full connection (trusting the
+	//     leaf Secret's ca.crt, which cert-manager populates) succeeds. The
+	//     negative probe passes the real password so rejection is transport
+	//     (pg_hba hostssl), not a missing-credential artifact. Run psql from the
+	//     postgres pod (it ships psql) against the postgres Service DNS, using the
+	//     pod's own POSTGRES_USER/DB/PASSWORD env so this is independent of the
+	//     exact db.
 	pgHost := release + "-postgresql"
 	pgPod := c.FirstPodName(t, namespace, "app.kubernetes.io/name=postgresql")
 	const pgCA = "/var/lib/postgresql/tls/ca.crt"
 
 	pgPlainOut, pgPlainErr := c.Exec(t, namespace, pgPod, "",
-		fmt.Sprintf(`psql "host=%s port=5432 user=$POSTGRES_USER dbname=$POSTGRES_DB sslmode=disable connect_timeout=5" -c "select 1"`, pgHost))
+		fmt.Sprintf(`psql "host=%s port=5432 user=$POSTGRES_USER dbname=$POSTGRES_DB password=$POSTGRES_PASSWORD sslmode=disable connect_timeout=5" -c "select 1"`, pgHost))
 	if pgPlainErr == nil && !strings.Contains(strings.ToLower(pgPlainOut), "fatal") && !strings.Contains(strings.ToLower(pgPlainOut), "error") {
-		t.Errorf("postgres plaintext select succeeded (want pg_hba rejection): %s", pgPlainOut)
+		t.Errorf("postgres authenticated plaintext select succeeded (want pg_hba rejection): %s", pgPlainOut)
 	}
 
 	pgTLSOut, pgTLSErr := c.Exec(t, namespace, pgPod, "",
