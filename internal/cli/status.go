@@ -68,6 +68,11 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 		} else {
 			fmt.Fprintf(out, "  operator:      not installed (want %s)\n", g.Version)
 		}
+		if v := cfg.Spec.GPU.Driver.Version; v != "" {
+			fmt.Fprintf(out, "  driver:        %s\n", v)
+		} else {
+			fmt.Fprintf(out, "  driver:        (chart default)\n")
+		}
 		ready, _ := p.GPUReady(ctx)
 		fmt.Fprintf(out, "  clusterpolicy: %s\n", boolLabel(ready, "ready", "notReady"))
 	}

@@ -44,3 +44,5 @@ spec:
       # chart: gpu-operator                             # default
       # release: opo1-gpu-operator                      # default: <metadata.name>-gpu-operator
       # namespace: gpu-operator                         # default
+    driver:                    # NVIDIA driver the operator loads (HOR-401); node-readiness, not an overlay value
+      # version: "570.186"    # pin a driver version for reproducibility; omit/empty => chart default

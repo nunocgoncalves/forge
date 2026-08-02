@@ -507,6 +507,79 @@ func TestApply_GPU(t *testing.T) {
 	assert.True(t, res.ChartApplied)
 }
 
+func TestApply_GPU_EmptyDriverOmitsSet(t *testing.T) {
+	// Empty driver version => no driver.version Helm --set emitted (chart default).
+	// Mirrors the existing TestApply_GPU values assertion but asserts the plan/result
+	// fields are empty too.
+	p := &fakeProv{pf: gpuReadyPf()}
+	plan, err := Plan(context.Background(), testConfigWithGPU(), p)
+	require.NoError(t, err)
+	assert.Empty(t, plan.GPUDriverVersion)
+
+	useTempHome(t)
+	p = &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          true,
+	}
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, nil, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Len(t, d.applyCalls, 2)
+	op := d.applyCalls[0]
+	for _, v := range op.values {
+		assert.NotContains(t, v, "driver.version")
+	}
+	assert.Empty(t, res.GPUDriverVersion)
+}
+
+func TestApply_GPU_PinnedDriverEmitsSet(t *testing.T) {
+	cfg := testConfigWithGPU()
+	cfg.Spec.GPU.Driver = config.GPUDriver{Version: "570.186"}
+
+	p := &fakeProv{pf: gpuReadyPf()}
+	plan, err := Plan(context.Background(), cfg, p)
+	require.NoError(t, err)
+	assert.Equal(t, "570.186", plan.GPUDriverVersion)
+
+	useTempHome(t)
+	p = &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          true,
+	}
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), cfg, p, d, nil, nil, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Len(t, d.applyCalls, 2)
+	op := d.applyCalls[0]
+	assert.Contains(t, op.values, "driver.version=570.186")
+	// ordering / other values unchanged — driver.version appended after the base set.
+	assert.Equal(t, []string{
+		"cdi.enabled=true",
+		"driver.enabled=true",
+		"toolkit.enabled=true",
+		"devicePlugin.enabled=true",
+		"gfd.enabled=true",
+		"toolkit.env[0].name=CONTAINERD_CONFIG",
+		"toolkit.env[0].value=/var/lib/rancher/k3s/agent/etc/containerd/config.toml",
+		"toolkit.env[1].name=CONTAINERD_SOCKET",
+		"toolkit.env[1].value=/run/k3s/containerd/containerd.sock",
+		"toolkit.env[2].name=CONTAINERD_RUNTIME_CLASS",
+		"toolkit.env[2].value=nvidia",
+		"driver.version=570.186",
+	}, op.values)
+	assert.Equal(t, "570.186", res.GPUDriverVersion)
+}
+
 func TestApply_SkipGPU(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{
