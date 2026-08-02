@@ -262,8 +262,15 @@ func (g *GPU) applyDefaults(install string) {
 // validate enforces v1 constraints on the GPU configuration. GPU readiness
 // supports single-node only in v1 (HA is already refused by mode validation;
 // this guard makes the intent explicit and keeps GPU enablement honest).
+//
+// A non-empty driver version with gpu.enabled: false is rejected: the pin is
+// inert when GPU is disabled (no operator runs to materialize it), so keeping
+// it would be silently ignored config. Clear gpu.driver.version or enable gpu.
 func (g GPU) validate(mode string) error {
 	if !g.Enabled {
+		if g.Driver.Version != "" {
+			return fmt.Errorf("gpu.driver.version %q is set but gpu.enabled is false — clear gpu.driver.version or enable gpu", g.Driver.Version)
+		}
 		return nil
 	}
 	if mode != ModeSingleNode {

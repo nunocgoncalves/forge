@@ -589,7 +589,7 @@ func TestApply_SkipGPU(t *testing.T) {
 		gpuReady:          true,
 	}
 	d := &fakeDeployer{}
-	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, nil, ApplyOpts{
+	res, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, nil, ApplyOpts{
 		SkipGPU: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -597,6 +597,35 @@ func TestApply_SkipGPU(t *testing.T) {
 	assert.Equal(t, 0, p.ensureDepsCalls) // no build deps
 	require.Len(t, d.applyCalls, 1)       // platform chart only
 	assert.Equal(t, "opo1", d.applyCalls[0].release)
+	// Skipped phase does not claim the operator ran.
+	assert.False(t, res.GPUOperatorApplied)
+	assert.False(t, res.GPUReady)
+	// No pin configured => result stays empty (apply report shows chart default).
+	assert.Empty(t, res.GPUDriverVersion)
+}
+
+func TestApply_SkipGPU_SurfacesConfiguredPin(t *testing.T) {
+	// HOR-401: with --skip-gpu and a configured pin, the apply report must
+	// surface the configured driver version rather than claiming chart-default
+	// semantics — the pin is what the config requests even though no GPU
+	// reconciliation ran.
+	useTempHome(t)
+	cfg := testConfigWithGPU()
+	cfg.Spec.GPU.Driver = config.GPUDriver{Version: "570.186"}
+	p := &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          true,
+	}
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), cfg, p, d, nil, nil, ApplyOpts{
+		SkipGPU: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Len(t, d.applyCalls, 1) // platform chart only — GPU phase skipped
+	assert.False(t, res.GPUOperatorApplied)
+	assert.Equal(t, "570.186", res.GPUDriverVersion)
 }
 
 func TestApply_GPU_NotReady(t *testing.T) {

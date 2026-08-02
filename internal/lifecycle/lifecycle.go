@@ -362,6 +362,12 @@ const gpuOperatorRepoName = "nvidia"
 // immediately.
 func applyGPU(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, opts ApplyOpts, res *Result) error {
 	if !cfg.Spec.GPU.Enabled || opts.SkipGPU {
+		// Even when the GPU phase is skipped, surface the configured driver pin
+		// in the result so the apply report reflects what the config requests
+		// rather than claiming chart-default semantics (HOR-401: report the
+		// pinned version). The operator did not run, so GPUOperatorApplied /
+		// GPUReady stay false.
+		res.GPUDriverVersion = cfg.Spec.GPU.Driver.Version
 		return nil
 	}
 	if err := p.EnsureDriverBuildDeps(ctx); err != nil {

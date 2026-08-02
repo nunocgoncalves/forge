@@ -226,6 +226,18 @@ func TestGPUValidate_RequiresSingleNode(t *testing.T) {
 	assert.Contains(t, err.Error(), "single-node")
 }
 
+func TestGPUValidate_DisabledRejectsDriverVersion(t *testing.T) {
+	// HOR-401: a non-empty driver pin with gpu.enabled: false is invalid — the
+	// pin is inert when no operator runs, so it must not be silently ignored.
+	err := GPU{Enabled: false, Driver: GPUDriver{Version: "570.186"}}.validate(ModeSingleNode)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gpu.driver.version")
+	assert.Contains(t, err.Error(), "gpu.enabled is false")
+
+	// Disabled with no driver pin remains valid.
+	require.NoError(t, GPU{Enabled: false}.validate(ModeSingleNode))
+}
+
 func TestParse_OverlayDefaults(t *testing.T) {
 	c, err := Parse(yamlFor(t, func(cc *Cluster) {
 		cc.Spec.Overlay = Overlay{Repo: "https://github.com/example/iterabase-overlay.git"}
