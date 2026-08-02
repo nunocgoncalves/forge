@@ -57,6 +57,7 @@ type ReconcilePlan struct {
 	ChartVersion       string // platform chart version to apply (empty => skip)
 	GPUEnabled         bool   // gpu.enabled; the GPU readiness phase will run
 	GPUOperatorVersion string // nvidia/gpu-operator chart version to install (empty => GPU disabled)
+	GPUDriverVersion   string // nvidia driver version to pin (empty => gpu-operator chart default)
 	OverlayRepo        string // overlay.repo (empty => overlay phase skipped)
 	OverlayRef         string // overlay.ref (branch or tag)
 	FluxEnabled        bool   // flux.enabled; the Flux GitOps phase will run
@@ -70,6 +71,7 @@ type Result struct {
 	NodeReady           bool
 	ChartApplied        bool
 	GPUOperatorApplied  bool   // nvidia/gpu-operator release installed/upgraded
+	GPUDriverVersion    string // nvidia driver version pinned via driver.version (empty => chart default)
 	GPUReady            bool   // ClusterPolicy reached state=ready (the GPU readiness gate)
 	OverlayApplied      bool   // overlay cloned + chart applied with overlay values + CRD instances applied
 	OverlayCommit       string // resolved overlay commit SHA
@@ -135,6 +137,7 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 		}
 		plan.GPUEnabled = true
 		plan.GPUOperatorVersion = cfg.Spec.GPU.Operator.Version
+		plan.GPUDriverVersion = cfg.Spec.GPU.Driver.Version
 	}
 	plan.OverlayRepo = cfg.Spec.Overlay.Repo
 	plan.OverlayRef = cfg.Spec.Overlay.Ref
@@ -376,12 +379,13 @@ func applyGPU(ctx context.Context, cfg *config.Cluster, p provisioner.Provisione
 		Repository: chartRef,
 		Version:    g.Version,
 		Namespace:  g.Namespace,
-		Values:     gpuOperatorValues(),
+		Values:     gpuOperatorValues(cfg.Spec.GPU),
 	}); err != nil {
 		auditFail(cfg, "apply-gpu", err)
 		return fmt.Errorf("gpu operator: %w", err)
 	}
 	res.GPUOperatorApplied = true
+	res.GPUDriverVersion = cfg.Spec.GPU.Driver.Version
 
 	ready, err := waitForGPU(ctx, p, opts)
 	if err != nil {
@@ -424,6 +428,12 @@ func waitForGPU(ctx context.Context, p provisioner.Provisioner, opts ApplyOpts) 
 // overrides are a fast-follow. CDI is enabled so workloads request
 // nvidia.com/gpu with no runtimeClassName.
 //
+// The driver version is pinned only when the operator set spec.gpu.driver.version
+// (a node-readiness substrate field). An empty version means the gpu-operator
+// chart's own default driver is used — no driver.version --set is emitted — so
+// operators who do not care follow the chart, while a pinned version makes the
+// host driver reproducible across chart bumps and intentional driver moves.
+//
 // k3s containerd: the operator does not auto-detect k3s, so the toolkit must be
 // pointed at k3s's containerd config + socket via toolkit.env (the operator
 // derives the host mounts from these and rewrites them to its in-container
@@ -435,8 +445,8 @@ func waitForGPU(ctx context.Context, p provisioner.Provisioner, opts ApplyOpts) 
 // nvidia.com/gpu, with no runtimeClassName, gets no device). nvidia stays
 // non-default, so non-GPU pods run on runc. This is the Q7 RuntimeClass
 // fallback — record it for HOR-306 (ModelBackend vLLM pod spec).
-func gpuOperatorValues() []string {
-	return []string{
+func gpuOperatorValues(g config.GPU) []string {
+	values := []string{
 		"cdi.enabled=true",
 		"driver.enabled=true",
 		"toolkit.enabled=true",
@@ -449,6 +459,10 @@ func gpuOperatorValues() []string {
 		"toolkit.env[2].name=CONTAINERD_RUNTIME_CLASS",
 		"toolkit.env[2].value=nvidia",
 	}
+	if v := strings.TrimSpace(g.Driver.Version); v != "" {
+		values = append(values, "driver.version="+v)
+	}
+	return values
 }
 
 func isUbuntu(os string) bool { return strings.HasPrefix(os, "Ubuntu") }

@@ -204,6 +204,18 @@ func (c *Chart) applyDefaults(install string) {
 type GPU struct {
 	Enabled  bool        `yaml:"enabled"`
 	Operator GPUOperator `yaml:"operator"`
+	Driver   GPUDriver   `yaml:"driver"`
+}
+
+// GPUDriver is the NVIDIA driver the gpu-operator installs and loads as a host
+// kernel module. It is a node-readiness / substrate concern, on the same
+// footing as the operator chart pointer — NOT an overlay chart value. An empty
+// Version means the operator chart's own default driver is used (no
+// driver.version Helm --set emitted); setting it pins the driver version for
+// reproducibility across chart bumps and intentional driver moves. v1: the
+// operator compiles and loads the driver on the host; forge just sets the value.
+type GPUDriver struct {
+	Version string `yaml:"version"` // NVIDIA driver version (e.g. 570.186); empty => chart default
 }
 
 // GPUOperator is the NVIDIA GPU Operator Helm release pointer. Defaults are

@@ -202,6 +202,24 @@ func TestParse_GPUDisabledNoDefaults(t *testing.T) {
 	assert.Empty(t, c.Spec.GPU.Operator.Version)
 }
 
+func TestParse_GPUDriverEmptyByDefault(t *testing.T) {
+	// Empty driver version is valid and stays empty — no forge-pinned default;
+	// empty means the gpu-operator chart's own default driver is used.
+	c, err := Parse(yamlFor(t, func(cc *Cluster) {
+		cc.Spec.GPU = GPU{Enabled: true}
+	}))
+	require.NoError(t, err)
+	assert.Empty(t, c.Spec.GPU.Driver.Version)
+}
+
+func TestParse_GPUDriverExplicitPassthrough(t *testing.T) {
+	c, err := Parse(yamlFor(t, func(cc *Cluster) {
+		cc.Spec.GPU = GPU{Enabled: true, Driver: GPUDriver{Version: "570.186"}}
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, "570.186", c.Spec.GPU.Driver.Version)
+}
+
 func TestGPUValidate_RequiresSingleNode(t *testing.T) {
 	err := GPU{Enabled: true}.validate(ModeHA)
 	require.Error(t, err)

@@ -112,6 +112,11 @@ func printApplyResult(out io.Writer, cfg *config.Cluster, res *lifecycle.Result)
 	if cfg.Spec.GPU.Enabled {
 		fmt.Fprintf(out, "  gpu operator: %v\n", res.GPUOperatorApplied)
 		fmt.Fprintf(out, "  gpu ready: %v\n", res.GPUReady)
+		if v := res.GPUDriverVersion; v != "" {
+			fmt.Fprintf(out, "  gpu driver: %s\n", v)
+		} else {
+			fmt.Fprintf(out, "  gpu driver: (chart default)\n")
+		}
 	}
 	if cfg.Spec.Overlay.Repo != "" {
 		fmt.Fprintf(out, "  overlay:        %s@%s\n", cfg.Spec.Overlay.Repo, cfg.Spec.Overlay.Ref)
@@ -154,6 +159,11 @@ func printPlan(cmd *cobra.Command, plan *lifecycle.ReconcilePlan) {
 	}
 	if plan.GPUEnabled {
 		fmt.Fprintf(out, "  gpu:       %s (enabled)\n", plan.GPUOperatorVersion)
+		if v := plan.GPUDriverVersion; v != "" {
+			fmt.Fprintf(out, "  gpu driver: %s\n", v)
+		} else {
+			fmt.Fprintf(out, "  gpu driver: (chart default)\n")
+		}
 		fmt.Fprintf(out, "  gpu pci:   %v\n", plan.Preflight.HasNVIDIAGPU)
 	}
 	if plan.OverlayRepo != "" {
