@@ -10,14 +10,14 @@ import (
 	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
 )
 
-// TestCertIssuers deploys the iterabase-platform umbrella with cert-manager +
+// runCertIssuers deploys the iterabase-platform umbrella with cert-manager +
 // the cert-issuers subchart (self-signed ClusterIssuer) to a local Kind cluster,
 // simulates the forge secret-sync (applies a dummy cloudflare token Secret in
 // the cert-manager controller namespace), and asserts the self-signed
-// ClusterIssuer reaches Ready. Proves the HOR-342 chart deploys + cert-manager
-// reconciles + the secret-namespace plumbing the HOR-364 secret-sync targets,
-// without real Cloudflare credentials (the LE/DNS-01 path is covered by the
-// forge unit tests + the DO secret-sync e2e).
+// ClusterIssuer reaches Ready. These are intentionally two adjacent boundary
+// checks: the self-signed issuer does not consume the Cloudflare Secret. The
+// LE/DNS-01 reference shape is covered by chart/unit tests, while the DO CPU
+// scenario proves forge's env→SSH-stdin→Secret transport without real credentials.
 //
 // The umbrella chart is published at
 // oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform with its
@@ -25,7 +25,7 @@ import (
 // version is auto-resolved to the latest stable release; override via env for
 // local dev/pinning: ITERABASE_PLATFORM_LOCAL_CHART points at a checkout (helm
 // installs the path directly), ITERABASE_CHART_VERSION pins a specific release.
-func TestCertIssuers(t *testing.T) {
+func runCertIssuers(t *testing.T) {
 	chartRef := envOr("ITERABASE_PLATFORM_CHART", "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform")
 	localChart := os.Getenv("ITERABASE_PLATFORM_LOCAL_CHART") // optional local path for dev
 	chartVersion := os.Getenv("ITERABASE_CHART_VERSION")

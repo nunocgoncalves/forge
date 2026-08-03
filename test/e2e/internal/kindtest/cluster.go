@@ -44,6 +44,10 @@ func UseCluster(t *testing.T, name, kubeconfig string) *Cluster {
 func CreateCluster(t *testing.T, name string) *Cluster {
 	t.Helper()
 	mustBin(t, "kind")
+	// A crashed local run may leave its Docker node behind. Give every run a
+	// unique name so stale test infrastructure cannot block or be mistaken for
+	// the clean-cluster contract this scenario is meant to validate.
+	name = fmt.Sprintf("%s-%d", name, time.Now().UnixNano())
 	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig.yaml")
 	run(t, "kind", "create", "cluster", "--name", name, "--kubeconfig", kubeconfig)
 	t.Cleanup(func() {

@@ -15,7 +15,7 @@ import (
 	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
 )
 
-// TestInferenceFlowContract deploys the iterabase-platform umbrella chart
+// runInferenceFlowContract deploys the iterabase-platform umbrella chart
 // (control-plane + inference-gateway + shared pgvector Postgres with the
 // read-only `gateway` user + redis) to a local Kind cluster and exercises the
 // control-plane↔gateway contract end-to-end via real LISTEN/NOTIFY propagation.
@@ -47,7 +47,7 @@ import (
 // via env for local dev / pinning: ITERABASE_LOCAL_CHART points at a checkout,
 // ITERABASE_LOCAL_IMAGE loads a locally-built image into the Kind nodes, and
 // ITERABASE_CHART_VERSION pins a specific release.
-func TestInferenceFlowContract(t *testing.T) {
+func runInferenceFlowContract(t *testing.T) {
 	// --- chart config (env-overridable) ---
 	chartRef := envOr("ITERABASE_CHART", "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform")
 	localChart := os.Getenv("ITERABASE_LOCAL_CHART")
@@ -152,7 +152,17 @@ spec:
 	mustWriteFile(t, filepath.Join(overlayDir, "crds", "base", "kustomization.yaml"),
 		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nmetadata:\n  name: overlay-crds-base\nresources: []\n")
 	mustWriteFile(t, filepath.Join(clientDir, "kustomization.yaml"),
-		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nmetadata:\n  name: overlay-crds-client\nresources:\n  - ../base\n  - modelbackend.yaml\n  - model.yaml\n")
+		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nmetadata:\n  name: overlay-crds-client\nresources:\n  - ../base\n  - permissionpolicy.yaml\n  - modelbackend.yaml\n  - model.yaml\n")
+	mustWriteFile(t, filepath.Join(clientDir, "permissionpolicy.yaml"), fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
+kind: PermissionPolicy
+metadata:
+  name: inference-user
+  namespace: %s
+spec:
+  subject:
+    kind: user
+    key: %s/inference-user
+`, namespace, namespace))
 	mustWriteFile(t, filepath.Join(clientDir, "modelbackend.yaml"), fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
 kind: ModelBackend
 metadata:
@@ -175,6 +185,11 @@ spec:
     rewrite_model_name: true
 `, mbName, namespace, alias, mbName))
 	c.Kubectl(t, "apply", "-k", clientDir)
+	// Broad-default remains the effective capability mode in v1, but HOR-324's
+	// PermissionPolicy contract must still materialize in Postgres.
+	c.Kubectl(t, "wait", "-n", namespace,
+		"permissionpolicy.platform.iterabase.com/inference-user",
+		"--for", "jsonpath={.status.ready}=true", "--timeout", "60s")
 	// Wait for the ModelBackend to be materialized (deployed=true; the Deployment
 	// is created even though the pod stays Pending on kind).
 	c.Kubectl(t, "wait", "-n", namespace, "modelbackend.platform.iterabase.com/"+mbName,

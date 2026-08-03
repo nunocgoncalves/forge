@@ -16,7 +16,7 @@ import (
 	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
 )
 
-// TestControlPlaneIdentity deploys the control-plane Helm chart to a local Kind
+// runControlPlaneIdentity deploys the control-plane Helm chart to an isolated Kind
 // cluster and exercises the full identity flow end-to-end:
 //
 //	deploy chart (pgvector Postgres + manager + api + migrate + bootstrap)
@@ -41,7 +41,7 @@ import (
 // (helm installs the path directly), CONTROL_PLANE_LOCAL_IMAGE loads a
 // locally-built image into the Kind nodes, and CONTROL_PLANE_CHART_VERSION /
 // CONTROL_PLANE_IMAGE_TAG pin a specific release/tag.
-func TestControlPlaneIdentity(t *testing.T) {
+func runControlPlaneIdentity(t *testing.T) {
 	// --- chart config (env-overridable) ---
 	chartRef := envOr("CONTROL_PLANE_CHART", "oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane")
 	localChart := os.Getenv("CONTROL_PLANE_LOCAL_CHART") // optional local path for dev
@@ -204,7 +204,8 @@ func mustFindKey(t *testing.T, logs, scope string) string {
 			return m[2]
 		}
 	}
-	t.Fatalf("bootstrap key %q not found in logs:\n%s", scope, logs)
+	redacted := keyRe.ReplaceAllString(logs, "API key ($1): <redacted>")
+	t.Fatalf("bootstrap key %q not found in logs:\n%s", scope, redacted)
 	return ""
 }
 

@@ -23,6 +23,7 @@ import (
 
 	"github.com/digitalocean/godo"
 	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
+	"github.com/nunocgoncalves/forge/test/e2e/internal/runner"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,137 +38,154 @@ const (
 	k3sPort = 6443
 )
 
-func TestE2E(t *testing.T) {
+type digitalOceanCPUState struct {
+	ctx          context.Context
+	client       *godo.Client
+	runID        string
+	keep         bool
+	pubKey       string
+	privKeyPath  string
+	droplet      *godo.Droplet
+	ip           string
+	forgeBin     string
+	forgeHome    string
+	chartVersion string
+}
+
+func runDigitalOceanCPU(t *testing.T) {
 	token := os.Getenv("DIGITALOCEAN_TOKEN")
 	if token == "" {
-		t.Skip("DIGITALOCEAN_TOKEN not set; skipping e2e")
+		t.Skip("DIGITALOCEAN_TOKEN not set; skipping DigitalOcean CPU scenario")
 	}
 
-	ctx := context.Background()
-	client := godo.NewFromToken(token)
-	runID := fmt.Sprintf("forge-e2e-%d", time.Now().Unix())
-	keep := os.Getenv("FORGE_E2E_KEEP") != ""
+	state := &digitalOceanCPUState{
+		ctx:       context.Background(),
+		client:    godo.NewFromToken(token),
+		runID:     fmt.Sprintf("forge-e2e-%d", time.Now().Unix()),
+		keep:      os.Getenv("FORGE_E2E_KEEP") != "",
+		forgeHome: t.TempDir(),
+	}
+	state.pubKey, state.privKeyPath = generateKey(t)
+	state.forgeBin = buildForge(t)
+	state.chartVersion = os.Getenv("ITERABASE_CHART_VERSION")
+	if state.chartVersion == "" {
+		state.chartVersion = kindtest.LatestChartVersion(t, "iterabase-platform")
+	}
+	t.Logf("run %s (keep=%v)", state.runID, state.keep)
+	t.Cleanup(func() { state.cleanup(t) })
 
-	t.Logf("run %s (keep=%v)", runID, keep)
-
-	// 1. ephemeral SSH keypair
-	pubKeyStr, privKeyPath := generateKey(t)
-
-	// 2. create droplet with cloud-init forge user. Provisioning is retried
-	//    because DO droplets occasionally never accept SSH within a reasonable
-	//    window (boot/cloud-init variance in fra1); a fresh droplet is cheaper
-	//    than failing the whole run. The successful droplet is cleaned up by the
-	//    defer; failed attempts are deleted inline (the reaper is the safety net).
-	var (
-		ip      string
-		droplet *godo.Droplet
+	runner.RunStages(t, state,
+		runner.Stage[*digitalOceanCPUState]{Name: "provision-host", Run: provisionCPUStage},
+		runner.Stage[*digitalOceanCPUState]{Name: "reject-gpu-on-cpu-host", Run: rejectGPUOnCPUStage},
+		runner.Stage[*digitalOceanCPUState]{Name: "apply-baseline", Run: applyBaselineStage},
+		runner.Stage[*digitalOceanCPUState]{Name: "assert-baseline", Run: assertBaselineStage},
+		runner.Stage[*digitalOceanCPUState]{Name: "reapply-idempotently", Run: reapplyBaselineStage},
+		runner.Stage[*digitalOceanCPUState]{Name: "apply-public-overlay", Run: runOverlayStage},
+		runner.Stage[*digitalOceanCPUState]{Name: "sync-secrets", Run: runSecretsStage},
+		runner.Stage[*digitalOceanCPUState]{Name: "install-and-reconcile-flux", Run: runFluxStage},
 	)
-	const maxDropletAttempts = 2
-	for attempt := 1; attempt <= maxDropletAttempts; attempt++ {
-		d, err := createDroplet(ctx, client, runID, pubKeyStr)
+}
+
+func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {
+	t.Helper()
+	const maxAttempts = 2
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		d, err := createDroplet(state.ctx, state.client, state.runID, state.pubKey)
 		if err != nil {
-			t.Logf("create droplet attempt %d/%d failed: %v", attempt, maxDropletAttempts, err)
-			if attempt < maxDropletAttempts {
+			t.Logf("create droplet attempt %d/%d failed: %v", attempt, maxAttempts, err)
+			if attempt < maxAttempts {
 				time.Sleep(5 * time.Second)
 				continue
 			}
-			t.Fatalf("create droplet failed after %d attempts: %v", maxDropletAttempts, err)
+			t.Fatalf("create droplet failed after %d attempts: %v", maxAttempts, err)
 		}
-		attemptIP, err := waitForIP(ctx, client, d.ID)
-		if err != nil {
-			t.Logf("wait for IP attempt %d/%d failed: %v", attempt, maxDropletAttempts, err)
-			deleteDroplet(ctx, client, d.ID)
-			if attempt < maxDropletAttempts {
-				continue
-			}
-			t.Fatalf("wait for IP failed after %d attempts: %v", maxDropletAttempts, err)
+		ip, err := waitForIP(state.ctx, state.client, d.ID)
+		if err == nil {
+			err = waitForHostReady(state.ctx, ip, state.privKeyPath)
 		}
-		t.Logf("droplet ip %s (attempt %d/%d)", attemptIP, attempt, maxDropletAttempts)
-		if err := waitForHostReady(ctx, attemptIP, privKeyPath); err != nil {
-			t.Logf("host readiness attempt %d/%d failed: %v", attempt, maxDropletAttempts, err)
-			deleteDroplet(ctx, client, d.ID)
-			if attempt < maxDropletAttempts {
-				continue
-			}
-			t.Fatalf("host never became ready after %d droplet attempts: %v", maxDropletAttempts, err)
-		}
-		ip, droplet = attemptIP, d
-		break
-	}
-	defer func() {
-		if droplet == nil {
+		if err == nil {
+			state.droplet, state.ip = d, ip
+			t.Logf("droplet ip %s (attempt %d/%d)", ip, attempt, maxAttempts)
 			return
 		}
-		if keep {
-			t.Logf("keeping droplet %d (run %s) for debugging", droplet.ID, runID)
-			return
-		}
-		deleteDroplet(ctx, client, droplet.ID)
-	}()
-
-	// On any failure, dump pods + events (via SSH + the on-host k3s kubeconfig)
-	// before the droplet is destroyed, to aid diagnosis.
-	defer func() {
-		if !t.Failed() {
-			return
-		}
-		sc, err := sshDial(ip, privKeyPath)
-		if err != nil {
-			t.Logf("debug pod dump: ssh dial %s failed: %v", ip, err)
-			return
-		}
-		defer sc.Close()
-		out, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get pods -A 2>&1")
-		t.Logf("debug pod dump (on failure):\n%s", out)
-		ev, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get events -A --sort-by=.lastTimestamp 2>&1 | tail -30")
-		t.Logf("debug events (tail):\n%s", ev)
-	}()
-
-	// 3. build forge binary from the repo root
-	forgeBin := buildForge(t)
-
-	// 4. write forge.yaml + set FORGE_HOME to a temp dir. The chart version is
-	//    auto-resolved to the latest stable iterabase-platform release (HOR-321)
-	//    so the test never drifts from the published charts.
-	chartVersion := os.Getenv("ITERABASE_CHART_VERSION")
-	if chartVersion == "" {
-		chartVersion = kindtest.LatestChartVersion(t, "iterabase-platform")
+		t.Logf("host readiness attempt %d/%d failed: %v", attempt, maxAttempts, err)
+		deleteDroplet(state.ctx, state.client, d.ID)
 	}
-	forgeHome := t.TempDir()
-	cfgPath := writeForgeConfig(t, runID, ip, privKeyPath, chartVersion)
+	t.Fatalf("host never became ready after %d droplet attempts", maxAttempts)
+}
 
-	// 4b. stand up a file:// overlay repo on the host with the MetalLB L2 edge
-	//     values (pool = the droplet's public IP). forge apply clones it (file://)
-	//     and feeds values.yaml to the chart. The chart defaults (TLS-on, host
-	//     gateway.iterabase.local, self-signed) + the overlay's metallb pool bring
-	//     up the public HTTPS edge. Mirrors the overlay deployment path OPO1 uses.
-	writeEdgeOverlayOnHost(t, ip, privKeyPath)
+func rejectGPUOnCPUStage(t *testing.T, state *digitalOceanCPUState) {
+	t.Helper()
+	cfgPath := writeForgeConfigGPU(t, state.runID, state.ip, state.privKeyPath)
+	out, err := runForgeE(state.forgeBin, state.forgeHome, "apply", "--config", cfgPath)
+	if err == nil {
+		t.Fatalf("apply should fail preflight with no NVIDIA GPU:\n%s", out)
+	}
+	if !strings.Contains(out, "no NVIDIA GPU") {
+		t.Fatalf("GPU preflight failure did not explain the missing NVIDIA GPU:\n%s", out)
+	}
+}
 
-	// 5. forge apply (k3s + platform chart + overlay via helm). Retried because the k3s
-	//    install script's binary download from GitHub releases is prone to
-	//    transient DO egress failures; `apply` is idempotent (re-reads live
-	//    state and reconciles) so re-running is safe. Only non-zero exits are
-	//    retried — a 0-exit missing "node ready: true" is a real regression.
-	out := applyWithRetry(t, forgeBin, forgeHome, cfgPath)
-	if !strings.Contains(out, "node ready: true") {
-		t.Fatalf("apply did not report node ready:\n%s", out)
-	}
-	if !strings.Contains(out, "chart applied: true") {
-		t.Fatalf("apply did not report chart applied:\n%s", out)
-	}
-	if !strings.Contains(out, "overlay applied: true") {
-		t.Fatalf("apply did not report overlay applied:\n%s", out)
-	}
+func applyBaselineStage(t *testing.T, state *digitalOceanCPUState) {
+	t.Helper()
+	writeEdgeOverlayOnHost(t, state.ip, state.privKeyPath)
+	out := applyWithRetry(t, state.forgeBin, state.forgeHome,
+		writeForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion))
+	assertApplyMarkers(t, out, "node ready: true", "chart applied: true", "overlay applied: true")
 	t.Logf("apply output:\n%s", out)
+}
 
-	// 6. node label + Ready + dual-stack pod CIDRs via the off-host kubeconfig (client-go)
-	kcPath := filepath.Join(forgeHome, runID, "kubeconfig.yaml")
-	checkNodeViaKubeconfig(t, kcPath, runID)
-
-	// 7. gateway pod Running + /health 200 over the real HTTPS edge (LoadBalancer
-	//    + MetalLB + cert-manager self-signed TLS), not a hostNetwork HTTP curl.
+func assertBaselineStage(t *testing.T, state *digitalOceanCPUState) {
+	t.Helper()
+	kcPath := filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml")
+	checkNodeViaKubeconfig(t, kcPath, state.runID)
 	checkGatewayRunning(t, kcPath)
-	checkGatewayHealth(t, ip)
+	checkGatewayHealth(t, state.ip)
+}
+
+func reapplyBaselineStage(t *testing.T, state *digitalOceanCPUState) {
+	t.Helper()
+	out := applyWithRetry(t, state.forgeBin, state.forgeHome,
+		writeForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion))
+	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "chart applied: true", "overlay applied: true")
+}
+
+func assertApplyMarkers(t *testing.T, out string, markers ...string) {
+	t.Helper()
+	for _, marker := range markers {
+		if !strings.Contains(out, marker) {
+			t.Fatalf("apply output missing %q:\n%s", marker, out)
+		}
+	}
+}
+
+func (state *digitalOceanCPUState) cleanup(t *testing.T) {
+	t.Helper()
+	if state.droplet == nil {
+		return
+	}
+	if t.Failed() {
+		state.dumpDiagnostics(t)
+	}
+	if state.keep {
+		t.Logf("keeping droplet %d (run %s) for debugging", state.droplet.ID, state.runID)
+		return
+	}
+	deleteDroplet(state.ctx, state.client, state.droplet.ID)
+}
+
+func (state *digitalOceanCPUState) dumpDiagnostics(t *testing.T) {
+	t.Helper()
+	sc, err := sshDial(state.ip, state.privKeyPath)
+	if err != nil {
+		t.Logf("debug pod dump: ssh dial %s failed: %v", state.ip, err)
+		return
+	}
+	defer sc.Close()
+	out, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get pods -A 2>&1")
+	t.Logf("debug pod dump (on failure):\n%s", out)
+	events, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get events -A --sort-by=.lastTimestamp 2>&1 | tail -30")
+	t.Logf("debug events (tail):\n%s", events)
 }
 
 func generateKey(t *testing.T) (pubKeyStr, privKeyPath string) {
@@ -188,15 +206,11 @@ func generateKey(t *testing.T) (pubKeyStr, privKeyPath string) {
 	}
 	privPEM := pem.EncodeToMemory(block)
 
-	f, err := os.CreateTemp("", "forge-e2e-key-*")
-	if err != nil {
-		t.Fatalf("create key file: %v", err)
-	}
-	if err := os.WriteFile(f.Name(), privPEM, 0o600); err != nil {
+	privKeyPath = filepath.Join(t.TempDir(), "id_ed25519")
+	if err := os.WriteFile(privKeyPath, privPEM, 0o600); err != nil {
 		t.Fatalf("write key file: %v", err)
 	}
-	f.Close()
-	return pubKeyStr, f.Name()
+	return pubKeyStr, privKeyPath
 }
 
 func cloudInit(pubKeyStr string) string {
@@ -279,17 +293,22 @@ func waitForSSH(ctx context.Context, ip, keyPath string) error {
 func waitForHostReady(ctx context.Context, ip, keyPath string) error {
 	const deadline = 5 * time.Minute
 	end := time.Now().Add(deadline)
+	var lastStatus string
+	var lastErr error
 	for time.Now().Before(end) {
 		client, err := sshDial(ip, keyPath)
 		if err == nil {
-			out, _ := sshOutput(client, "cloud-init status")
+			out, statusErr := sshOutput(client, "cloud-init status")
 			client.Close()
+			lastStatus, lastErr = strings.TrimSpace(out), statusErr
 			switch {
 			case strings.Contains(out, "status: done"):
 				return nil
 			case strings.Contains(out, "status: error"):
-				return fmt.Errorf("cloud-init failed on %s: %s", ip, strings.TrimSpace(out))
+				return fmt.Errorf("cloud-init failed on %s: %s", ip, lastStatus)
 			}
+		} else {
+			lastErr = err
 		}
 		select {
 		case <-ctx.Done():
@@ -297,7 +316,7 @@ func waitForHostReady(ctx context.Context, ip, keyPath string) error {
 		case <-time.After(5 * time.Second):
 		}
 	}
-	return fmt.Errorf("host %s never became ready (SSH up + cloud-init done) within %s", ip, deadline)
+	return fmt.Errorf("host %s never became ready (SSH up + cloud-init done) within %s (last status %q, last error %v)", ip, deadline, lastStatus, lastErr)
 }
 
 // sshOutput runs a command over an SSH client and returns its combined output.
@@ -346,39 +365,10 @@ func buildForge(t *testing.T) string {
 }
 
 func writeForgeConfig(t *testing.T, name, ip, keyPath, chartVersion string) string {
-	t.Helper()
-	cfg := fmt.Sprintf(`apiVersion: forge.horizonshift.io/v1alpha1
-kind: Cluster
-metadata:
-  name: %s
-spec:
-  mode: single-node
-  hosts:
-    - address: %s
-      sshUser: forge
-      sshKeyPath: %s
-      role: control-plane+worker
-      labels:
-        e2e.horizonshift.io/run: "%s"
-  k3s:
-    version: v1.31.5+k3s1
-    clusterCIDR: 10.42.0.0/16
-    serviceCIDR: 10.43.0.0/16
-    dualStack: true
-    clusterCIDRv6: fd42::/48
-    serviceCIDRv6: fd43::/112
-    disable: [traefik, servicelb]
-  chart:
-    version: %s
-  overlay:
-    repo: file:///tmp/edge-overlay
-    ref: master
-`, name, ip, keyPath, name, chartVersion)
-	p := filepath.Join(t.TempDir(), "forge.yaml")
-	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	return p
+	return writeForgeConfigSpec(t, forgeConfigSpec{
+		Name: name, Address: ip, SSHKeyPath: keyPath, RunLabel: true, DualStack: true,
+		ChartVersion: chartVersion, OverlayRepo: "file:///tmp/edge-overlay", OverlayRef: "master",
+	})
 }
 
 // runForgeE runs forge and returns its combined output and error (no t.Fatalf).
