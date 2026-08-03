@@ -266,23 +266,6 @@ func waitForIP(ctx context.Context, client *godo.Client, id int) (string, error)
 	}
 }
 
-func waitForSSH(ctx context.Context, ip, keyPath string) error {
-	deadline := time.Now().Add(3 * time.Minute)
-	for {
-		if _, err := sshDial(ip, keyPath); err == nil {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("SSH to %s never became reachable", ip)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(5 * time.Second):
-		}
-	}
-}
-
 // waitForHostReady waits until the droplet accepts SSH AND cloud-init has
 // finished applying its user-data (the forge user, passwordless sudo, curl).
 // Returning only once cloud-init reports "done" prevents forge's preflight from
