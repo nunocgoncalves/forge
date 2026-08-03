@@ -42,7 +42,8 @@ See `forge.example.yaml` for the full substrate config schema.
 
 ```sh
 make test           # unit + fake-SSH integration tests
-make test-e2e       # DigitalOcean cloud-VM e2e (needs DIGITALOCEAN_TOKEN)
+make test-e2e       # composed DigitalOcean CPU e2e (needs DIGITALOCEAN_TOKEN)
+make test-e2e-unit  # compile + unit-test the separate E2E harness module
 make lint           # golangci-lint
 make fmt-check      # gofmt check
 make install-hooks  # wire .githooks/ via core.hooksPath
@@ -62,7 +63,7 @@ Architecture invariants and v1 boundaries are documented in `AGENTS.md`.
 - `internal/lifecycle/` — phase orchestration + reconcile
 - `internal/artifacts/` — local state dir (`~/.forge/<install>/`)
 - `internal/version/` — build version
-- `test/e2e/` — DigitalOcean cloud-VM e2e (separate module)
+- `test/e2e/` — composable DigitalOcean/Kind E2E runner (separate module; see `DESIGN.md`)
 
 ## License
 

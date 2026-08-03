@@ -7,7 +7,6 @@ package e2e
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -17,13 +16,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/digitalocean/godo"
 	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
 	"github.com/stretchr/testify/require"
 )
 
-// TestInferenceFlowGPU runs the full inference happy path on the cheapest
-// creatable GPU droplet:
+// The GPU scenario's platform and inference stages run the full happy path on
+// the same cheapest-creatable GPU droplet used by the substrate smoke:
 //
 //	forge apply (k3s + GPU operator + iterabase-platform umbrella chart)
 //	  -> apply ModelBackend(kind: vLLM, Qwen/Qwen3.5-0.8B) + Model (alias)
@@ -33,49 +31,22 @@ import (
 //	  -> curl /v1/chat/completions with the gateway key -> a real completion
 //
 // Skips loudly when no GPU capacity is available so DO scarcity doesn't block
-// PRs (same trigger policy as TestGPUE2E). The contract-propagation layer is
-// covered by TestInferenceFlowContract on Kind; this test proves real serving.
-func TestInferenceFlowGPU(t *testing.T) {
-	token := os.Getenv("DIGITALOCEAN_TOKEN")
-	if token == "" {
-		t.Skip("DIGITALOCEAN_TOKEN not set; skipping e2e")
-	}
-	ctx := context.Background()
-	client := godo.NewFromToken(token)
-	runID := fmt.Sprintf("forge-inf-%d", time.Now().Unix())
-
-	// 1. provision the cheapest creatable GPU droplet (skip-loudly on no capacity).
-	pubKeyStr, privKeyPath := generateKey(t)
-	prov := &doGPUVMProvisioner{client: client}
-	vm, err := prov.Provision(ctx, runID, pubKeyStr, privKeyPath)
-	if errors.Is(err, ErrNoGPUCapacity) {
-		t.Skipf("inference GPU e2e skipped — no GPU capacity (try later or add Verda): %v", err)
-	}
-	require.NoError(t, err)
-	defer func() { _ = prov.Destroy(ctx, vm.ID) }()
-	t.Logf("gpu vm ip %s", vm.IP)
-
-	// 2. forge apply: k3s + GPU operator + the iterabase-platform umbrella chart.
-	//    The chart version is auto-resolved to the latest stable release so the
-	//    test never drifts from the published charts (HOR-321).
-	chartVersion := os.Getenv("ITERABASE_CHART_VERSION")
-	if chartVersion == "" {
-		chartVersion = kindtest.LatestChartVersion(t, "iterabase-platform")
-	}
-	forgeBin := buildForge(t)
-	forgeHome := t.TempDir()
-	cfgPath := writeForgeConfigInferenceGPU(t, runID, vm.IP, privKeyPath, chartVersion)
-	out := applyWithRetry(t, forgeBin, forgeHome, cfgPath)
-	if !strings.Contains(out, "gpu ready: true") {
-		dumpGPUDiagnostics(t, vm.IP, privKeyPath)
-		t.Fatalf("forge apply did not reach gpu ready:\n%s", out)
-	}
-	if !strings.Contains(out, "chart applied: true") {
-		t.Fatalf("forge apply did not report chart applied:\n%s", out)
-	}
+// PRs. The contract-propagation layer is covered by the isolated Kind scenario;
+// this stage proves real serving.
+func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
+	// GPU readiness was already proven on this host. Reconcile the same config
+	// with the platform chart while skipping a redundant GPU-operator upgrade.
+	cfgPath := writeForgeConfigInferenceGPU(t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion)
+	out := applyWithRetryArgs(t, state.forgeBin, state.forgeHome, cfgPath, "--skip-gpu")
+	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "chart applied: true")
 	t.Logf("apply output:\n%s", out)
+}
 
-	// 3. wrap the fetched kubeconfig with the kindtest helpers (kubectl +
+func runInferenceGPUStage(t *testing.T, state *digitalOceanGPUState) {
+	runID := state.runID
+	forgeHome := state.forgeHome
+
+	// Wrap the fetched kubeconfig with the kindtest helpers (kubectl +
 	//    port-forward against the remote k3s cluster, no Kind cluster created).
 	kcPath := filepath.Join(forgeHome, runID, "kubeconfig.yaml")
 	c := kindtest.UseCluster(t, runID, kcPath)
@@ -208,33 +179,10 @@ spec:
 // writeForgeConfigInferenceGPU writes a forge.yaml for the inference GPU e2e:
 // single-node k3s + GPU operator + the iterabase-platform umbrella chart.
 func writeForgeConfigInferenceGPU(t *testing.T, name, ip, keyPath, chartVersion string) string {
-	t.Helper()
-	cfg := fmt.Sprintf(`apiVersion: forge.horizonshift.io/v1alpha1
-kind: Cluster
-metadata:
-  name: %s
-spec:
-  mode: single-node
-  hosts:
-    - address: %s
-      sshUser: forge
-      sshKeyPath: %s
-      role: control-plane+worker
-  k3s:
-    version: v1.31.5+k3s1
-    clusterCIDR: 10.42.0.0/16
-    serviceCIDR: 10.43.0.0/16
-    dualStack: false
-  gpu:
-    enabled: true
-  chart:
-    version: %s
-    release: itb
-    namespace: iterabase-system
-`, name, ip, keyPath, chartVersion)
-	p := filepath.Join(t.TempDir(), "forge.yaml")
-	require.NoError(t, os.WriteFile(p, []byte(cfg), 0o600))
-	return p
+	return writeForgeConfigSpec(t, forgeConfigSpec{
+		Name: name, Address: ip, SSHKeyPath: keyPath, GPU: true,
+		ChartVersion: chartVersion, ChartRelease: "itb", ChartNamespace: "iterabase-system",
+	})
 }
 
 // waitForModelAvailable polls the gateway's /admin/v1/snapshot until the given
@@ -281,7 +229,7 @@ func waitForModelAvailable(t *testing.T, kubeconfig, namespace, mbName string, c
 
 // kubectlAllowFail runs kubectl with the given kubeconfig + returns (output,
 // error) without fataling — for best-effort diagnostics where a failing command
-// shouldn't abort the rest (mirrors runForgeAllowFail / sshRun in this package).
+// shouldn't abort the rest (mirrors sshRun in this package).
 func kubectlAllowFail(t *testing.T, kubeconfig string, args ...string) (string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)

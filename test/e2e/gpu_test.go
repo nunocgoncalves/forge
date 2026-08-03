@@ -1,6 +1,6 @@
-// Package e2e GPU scenarios: a preflight-fail on a CPU droplet and a full
-// happy path on a GPU droplet (cheapest creatable, skip-loudly on no capacity).
-// See the GPUVMProvisioner interface for the future Verda seam.
+// Package e2e contains the composed CPU/GPU cloud scenarios. The no-GPU
+// preflight runs on the shared CPU fixture; GPU readiness and real inference
+// share the cheapest creatable GPU VM. See GPUVMProvisioner for the Verda seam.
 package e2e
 
 import (
@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,9 +15,9 @@ import (
 	"time"
 
 	"github.com/digitalocean/godo"
-	"github.com/stretchr/testify/assert"
+	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
+	"github.com/nunocgoncalves/forge/test/e2e/internal/runner"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -66,7 +65,7 @@ func (p *doGPUVMProvisioner) Provision(ctx context.Context, runID, pubKeyStr, pr
 			lastErr = err
 			continue
 		}
-		if err := waitForSSH(ctx, ip, privKeyPath); err != nil {
+		if err := waitForHostReady(ctx, ip, privKeyPath); err != nil {
 			_, _ = p.client.Droplets.Delete(ctx, d.ID)
 			lastErr = err
 			continue
@@ -133,69 +132,84 @@ func createDropletIn(ctx context.Context, client *godo.Client, name, pubKeyStr, 
 	return d, err
 }
 
-// TestGPUE2E_PreflightFail asserts forge refuses gpu.enabled on a host with no
-// NVIDIA GPU (the S11 passthrough precondition guard). Runs on a cheap CPU
-// droplet.
-func TestGPUE2E_PreflightFail(t *testing.T) {
-	token := os.Getenv("DIGITALOCEAN_TOKEN")
-	if token == "" {
-		t.Skip("DIGITALOCEAN_TOKEN not set; skipping e2e")
-	}
-	ctx := context.Background()
-	client := godo.NewFromToken(token)
-	runID := fmt.Sprintf("forge-gpupf-%d", time.Now().Unix())
-
-	pubKeyStr, privKeyPath := generateKey(t)
-	d, err := createDropletIn(ctx, client, runID, pubKeyStr, "fra1", "s-1vcpu-2gb")
-	require.NoError(t, err)
-	defer func() { _, _ = client.Droplets.Delete(ctx, d.ID) }()
-
-	ip, err := waitForIP(ctx, client, d.ID)
-	require.NoError(t, err)
-	require.NoError(t, waitForSSH(ctx, ip, privKeyPath))
-
-	forgeBin := buildForge(t)
-	forgeHome := t.TempDir()
-	cfgPath := writeForgeConfigGPU(t, runID, ip, privKeyPath)
-	out, err := runForgeAllowFail(t, forgeBin, forgeHome, "apply", "--config", cfgPath)
-	require.Error(t, err, "apply should fail preflight with no NVIDIA GPU:\n%s", out)
-	assert.Contains(t, out, "no NVIDIA GPU")
+type digitalOceanGPUState struct {
+	ctx          context.Context
+	provisioner  GPUVMProvisioner
+	runID        string
+	keep         bool
+	privKeyPath  string
+	vm           *GPUVM
+	forgeBin     string
+	forgeHome    string
+	chartVersion string
 }
 
-// TestGPUE2E runs the full GPU happy path on the cheapest creatable GPU
-// droplet: forge apply installs the NVIDIA GPU Operator, gates on
-// ClusterPolicy ready, and a pod requesting nvidia.com/gpu runs nvidia-smi.
-// Skips loudly when no GPU capacity is available so DO scarcity doesn't block.
-func TestGPUE2E(t *testing.T) {
+func runDigitalOceanGPU(t *testing.T) {
 	token := os.Getenv("DIGITALOCEAN_TOKEN")
 	if token == "" {
-		t.Skip("DIGITALOCEAN_TOKEN not set; skipping e2e")
+		t.Skip("DIGITALOCEAN_TOKEN not set; skipping DigitalOcean GPU scenario")
 	}
+
 	ctx := context.Background()
 	client := godo.NewFromToken(token)
-	runID := fmt.Sprintf("forge-gpu-%d", time.Now().Unix())
+	pubKey, privKeyPath := generateKey(t)
+	state := &digitalOceanGPUState{
+		ctx:         ctx,
+		provisioner: &doGPUVMProvisioner{client: client},
+		runID:       fmt.Sprintf("forge-gpu-%d", time.Now().Unix()),
+		keep:        os.Getenv("FORGE_E2E_KEEP") != "",
+		privKeyPath: privKeyPath,
+		forgeBin:    buildForge(t),
+		forgeHome:   t.TempDir(),
+	}
+	state.chartVersion = os.Getenv("ITERABASE_CHART_VERSION")
+	if state.chartVersion == "" {
+		state.chartVersion = kindtest.LatestChartVersion(t, "iterabase-platform")
+	}
 
-	pubKeyStr, privKeyPath := generateKey(t)
-	prov := &doGPUVMProvisioner{client: client}
-	vm, err := prov.Provision(ctx, runID, pubKeyStr, privKeyPath)
+	vm, err := state.provisioner.Provision(ctx, state.runID, pubKey, privKeyPath)
 	if errors.Is(err, ErrNoGPUCapacity) {
 		t.Skipf("GPU e2e skipped — no GPU capacity (try later or add Verda): %v", err)
 	}
 	require.NoError(t, err)
-	defer func() { _ = prov.Destroy(ctx, vm.ID) }()
-	t.Logf("gpu vm ip %s", vm.IP)
+	state.vm = vm
+	t.Logf("gpu vm ip %s (keep=%v)", vm.IP, state.keep)
+	t.Cleanup(func() { state.cleanup(t) })
 
-	forgeBin := buildForge(t)
-	forgeHome := t.TempDir()
-	cfgPath := writeForgeConfigGPU(t, runID, vm.IP, privKeyPath)
-	out, applyErr := runForgeAllowFail(t, forgeBin, forgeHome, "apply", "--config", cfgPath)
-	if applyErr != nil || !strings.Contains(out, "gpu ready: true") {
-		dumpGPUDiagnostics(t, vm.IP, privKeyPath)
-		t.Fatalf("forge apply did not reach gpu ready:\n%s\nerr=%v", out, applyErr)
-	}
+	runner.RunStages(t, state,
+		runner.Stage[*digitalOceanGPUState]{Name: "apply-gpu-substrate", Run: applyGPUSubstrateStage},
+		runner.Stage[*digitalOceanGPUState]{Name: "assert-gpu-smoke", Run: assertGPUSmokeStage},
+		runner.Stage[*digitalOceanGPUState]{Name: "apply-platform", Run: applyInferencePlatformStage},
+		runner.Stage[*digitalOceanGPUState]{Name: "run-real-inference", Run: runInferenceGPUStage},
+	)
+}
+
+func applyGPUSubstrateStage(t *testing.T, state *digitalOceanGPUState) {
+	cfgPath := writeForgeConfigGPU(t, state.runID, state.vm.IP, state.privKeyPath)
+	out := applyWithRetry(t, state.forgeBin, state.forgeHome, cfgPath)
+	assertApplyMarkers(t, out, "node ready: true", "gpu ready: true")
 	t.Logf("apply output:\n%s", out)
+}
 
-	checkGPUSmoke(t, filepath.Join(forgeHome, runID, "kubeconfig.yaml"))
+func assertGPUSmokeStage(t *testing.T, state *digitalOceanGPUState) {
+	checkGPUSmoke(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
+}
+
+func (state *digitalOceanGPUState) cleanup(t *testing.T) {
+	t.Helper()
+	if state.vm == nil {
+		return
+	}
+	if t.Failed() {
+		dumpGPUDiagnostics(t, state.vm.IP, state.privKeyPath)
+	}
+	if state.keep {
+		t.Logf("keeping GPU VM %d (run %s) for debugging", state.vm.ID, state.runID)
+		return
+	}
+	if err := state.provisioner.Destroy(state.ctx, state.vm.ID); err != nil {
+		t.Logf("destroy GPU VM %d: %v", state.vm.ID, err)
+	}
 }
 
 // checkGPUSmoke schedules a one-off pod requesting nvidia.com/gpu that runs
@@ -250,61 +264,23 @@ func checkGPUSmoke(t *testing.T, kcPath string) {
 
 // writeForgeConfigGPU writes a k3s + GPU (no platform chart) forge.yaml.
 func writeForgeConfigGPU(t *testing.T, name, ip, keyPath string) string {
-	t.Helper()
-	cfg := fmt.Sprintf(`apiVersion: forge.horizonshift.io/v1alpha1
-kind: Cluster
-metadata:
-  name: %s
-spec:
-  mode: single-node
-  hosts:
-    - address: %s
-      sshUser: forge
-      sshKeyPath: %s
-      role: control-plane+worker
-  k3s:
-    version: v1.31.5+k3s1
-    clusterCIDR: 10.42.0.0/16
-    serviceCIDR: 10.43.0.0/16
-    dualStack: false
-  gpu:
-    enabled: true
-`, name, ip, keyPath)
-	p := filepath.Join(t.TempDir(), "forge.yaml")
-	require.NoError(t, os.WriteFile(p, []byte(cfg), 0o600))
-	return p
-}
-
-// runForgeAllowFail runs forge and returns (output, err) without fataling, for
-// asserting expected failures (e.g. preflight refusal).
-func runForgeAllowFail(t *testing.T, bin, forgeHome string, args ...string) (string, error) {
-	t.Helper()
-	cmd := exec.Command(bin, args...)
-	cmd.Env = append(os.Environ(), "FORGE_HOME="+forgeHome)
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	return writeForgeConfigSpec(t, forgeConfigSpec{
+		Name: name, Address: ip, SSHKeyPath: keyPath, GPU: true,
+	})
 }
 
 // sshRun runs a command on the droplet over SSH and returns combined output.
 func sshRun(t *testing.T, ip, keyPath, cmd string) (string, error) {
 	t.Helper()
-	data, err := os.ReadFile(keyPath)
-	require.NoError(t, err)
-	signer, err := ssh.ParsePrivateKey(data)
-	require.NoError(t, err)
-	cfg := &ssh.ClientConfig{
-		User:            "forge",
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // ephemeral test droplet
-		Timeout:         10 * time.Second,
-	}
-	client, err := ssh.Dial("tcp", ip+":22", cfg)
+	client, err := sshDial(ip, keyPath)
 	if err != nil {
 		return "", err
 	}
 	defer client.Close()
 	sess, err := client.NewSession()
-	require.NoError(t, err)
+	if err != nil {
+		return "", err
+	}
 	defer sess.Close()
 	out, err := sess.CombinedOutput(cmd)
 	return string(out), err

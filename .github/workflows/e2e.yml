@@ -7,33 +7,112 @@ on:
       - "internal/**"
       - "go.mod"
       - "go.sum"
+      - "Makefile"
       - "test/e2e/**"
       - ".github/workflows/e2e.yml"
+  schedule:
+    # One nightly integration burst. Kind contracts run independently and the
+    # GPU job skips visibly when DigitalOcean has no capacity.
+    - cron: "0 3 * * *"
   workflow_dispatch:
-
-# Serialize e2e globally (one droplet at a time); never cancel a running e2e so
-# its droplet is always torn down rather than orphaned.
-concurrency:
-  group: e2e
-  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  e2e:
+  harness:
+    name: harness-unit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26.x"
+      - name: compile scenarios and test harness internals
+        run: make test-e2e-unit
+      - name: lint nested E2E module
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: test/e2e
 
-      - name: e2e
+  digitalocean-cpu:
+    name: digitalocean-cpu
+    if: github.event_name != 'schedule'
+    needs: harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    concurrency:
+      group: e2e-digitalocean-cpu
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+      - name: composed CPU E2E
         run: make test-e2e
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
-          # Authenticates the GitHub releases API call that auto-resolves the
-          # chart version (raises the rate limit from 60 to 5000 req/hour).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  digitalocean-gpu:
+    name: digitalocean-gpu
+    needs: harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    concurrency:
+      group: e2e-digitalocean-gpu
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+      - name: composed GPU E2E
+        run: make test-e2e-gpu
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  kind:
+    name: kind-${{ matrix.name }}
+    needs: harness
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: controlplane-identity
+            target: test-e2e-controlplane
+            timeout: 20
+          - name: inference-contract
+            target: test-e2e-inference
+            timeout: 20
+          - name: cert-issuers
+            target: test-e2e-cert-issuers
+            timeout: 20
+          - name: internal-tls
+            target: test-e2e-internal-tls
+            timeout: 25
+    concurrency:
+      group: e2e-kind-${{ matrix.name }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+      - name: install kind, helm, and kubectl
+        run: |
+          curl -sSL -o /tmp/kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+          curl -sSL https://get.helm.sh/helm-v3.18.0-linux-amd64.tar.gz | tar -xz -C /tmp
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          curl -sSL -o /tmp/kubectl "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+      - name: run ${{ matrix.name }}
+        run: make ${{ matrix.target }}
+        env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

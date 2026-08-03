@@ -14,7 +14,7 @@ import (
 	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
 )
 
-// TestInternalTLS deploys the iterabase-platform umbrella to a local Kind
+// runInternalTLS deploys the iterabase-platform umbrella to an isolated Kind
 // cluster with the single internalTLS switch on (global.internalTLS.enabled),
 // and proves the in-cluster TLS plane works end-to-end off the private CA:
 //
@@ -41,7 +41,7 @@ import (
 // oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform; override via
 // env for local dev/pinning: ITERABASE_PLATFORM_LOCAL_CHART (helm installs the
 // path directly), ITERABASE_CHART_VERSION (pin a release).
-func TestInternalTLS(t *testing.T) {
+func runInternalTLS(t *testing.T) {
 	chartRef := envOr("ITERABASE_PLATFORM_CHART", "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform")
 	localChart := os.Getenv("ITERABASE_PLATFORM_LOCAL_CHART") // optional local path for dev
 	chartVersion := os.Getenv("ITERABASE_CHART_VERSION")

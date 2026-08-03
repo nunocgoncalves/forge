@@ -23,41 +23,38 @@ test: test-unit
 test-unit:
 	$(GO) test -race -count=1 ./...
 
+# The E2E module has one top-level TestE2E runner. -run selects an isolated
+# scenario; -v is required so capacity skips and named stages remain visible.
 test-e2e:
-	cd test/e2e && go test -race -count=1 -timeout 25m -run '^TestE2E$$' .
+	cd test/e2e && go test -v -race -count=1 -timeout 60m -run '^TestE2E$$/^digitalocean-cpu$$' .
 
-test-e2e-overlay:
-	cd test/e2e && go test -race -count=1 -timeout 25m -run '^TestE2EOverlay$$' .
-
-test-e2e-secrets:
-	cd test/e2e && go test -race -count=1 -timeout 25m -run '^TestE2ESecrets$$' .
-
-test-e2e-flux:
-	cd test/e2e && go test -race -count=1 -timeout 30m -run '^TestE2EFlux$$' .
-
-test-e2e-cert-issuers:
-	cd test/e2e && go test -race -count=1 -timeout 15m -run '^TestCertIssuers$$' .
-
-test-e2e-controlplane:
-	cd test/e2e && go test -race -count=1 -timeout 15m -run '^TestControlPlaneIdentity$$' ./...
+# Compatibility aliases: overlay, secret-sync, and Flux now compose on the one
+# CPU fixture instead of provisioning three additional droplets.
+test-e2e-overlay test-e2e-secrets test-e2e-flux: test-e2e
 
 test-e2e-gpu:
-	cd test/e2e && go test -race -count=1 -timeout 45m -run '^TestGPUE2E$$' .
+	cd test/e2e && go test -v -race -count=1 -timeout 60m -run '^TestE2E$$/^digitalocean-gpu$$' .
+
+# Compatibility alias: real inference now follows GPU smoke on the same VM.
+test-e2e-inference-gpu: test-e2e-gpu
+
+test-e2e-cert-issuers:
+	cd test/e2e && go test -v -race -count=1 -timeout 15m -run '^TestE2E$$/^kind-cert-issuers$$' .
+
+test-e2e-controlplane:
+	cd test/e2e && go test -v -race -count=1 -timeout 15m -run '^TestE2E$$/^kind-controlplane-identity$$' .
 
 test-e2e-internal-tls:
-	cd test/e2e && go test -race -count=1 -timeout 20m -run '^TestInternalTLS$$' .
+	cd test/e2e && go test -v -race -count=1 -timeout 20m -run '^TestE2E$$/^kind-internal-tls$$' .
 
 test-e2e-inference:
-	cd test/e2e && go test -race -count=1 -timeout 15m -run '^TestInferenceFlowContract$$' .
+	cd test/e2e && go test -v -race -count=1 -timeout 15m -run '^TestE2E$$/^kind-inference-contract$$' .
 
-test-e2e-inference-gpu:
-	cd test/e2e && go test -race -count=1 -timeout 45m -run '^TestInferenceFlowGPU$$' .
-
-# Pure unit tests for the e2e harness internals (kindtest): fast, no network,
-# no cluster. Covers the chart auto-resolution helpers (HOR-321). The e2e
-# module is a separate Go module, so this is scoped to ./internal/...
-# (the real e2e tests need Kind/DO and run via test-e2e-*).
+# Compile the scenario package without infrastructure, then run pure harness
+# unit tests (runner + kind/chart helpers). The nested module is outside the
+# root module's ./... and therefore needs this explicit CI target.
 test-e2e-unit:
+	cd test/e2e && go test -run '^$$' .
 	cd test/e2e && go test -race -count=1 ./internal/...
 
 lint:
