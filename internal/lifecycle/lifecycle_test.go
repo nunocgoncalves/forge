@@ -495,6 +495,8 @@ func TestApply_GPU(t *testing.T) {
 		"toolkit.env[1].value=/run/k3s/containerd/containerd.sock",
 		"toolkit.env[2].name=CONTAINERD_RUNTIME_CLASS",
 		"toolkit.env[2].value=nvidia",
+		"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true",
+		"driver.upgradePolicy.drain.enable=false",
 	}, op.values)
 	assert.Equal(t, "opo1", chart.release)
 	assert.Equal(t, "0.1.0", chart.version)
@@ -575,9 +577,41 @@ func TestApply_GPU_PinnedDriverEmitsSet(t *testing.T) {
 		"toolkit.env[1].value=/run/k3s/containerd/containerd.sock",
 		"toolkit.env[2].name=CONTAINERD_RUNTIME_CLASS",
 		"toolkit.env[2].value=nvidia",
+		"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true",
+		"driver.upgradePolicy.drain.enable=false",
 		"driver.version=570.186",
 	}, op.values)
 	assert.Equal(t, "570.186", res.GPUDriverVersion)
+}
+
+// TestApply_GPU_DriverUpgradePolicy pins the HOR-411 driver-upgrade values that
+// keep a single-node inference cluster schedulable across a driver bump:
+// emptyDir deletion is allowed so the upgrade can pass pod-deletion-required,
+// and full-node drain stays disabled so the control plane is not evicted.
+func TestApply_GPU_DriverUpgradePolicy(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          true,
+	}
+	d := &fakeDeployer{}
+	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, nil, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Len(t, d.applyCalls, 2)
+	op := d.applyCalls[0]
+	assert.Contains(t, op.values,
+		"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true")
+	assert.Contains(t, op.values,
+		"driver.upgradePolicy.drain.enable=false")
+	// Full-node drain must never be enabled by forge.
+	for _, v := range op.values {
+		assert.NotContains(t, v, "drain.enable=true")
+	}
 }
 
 func TestApply_SkipGPU(t *testing.T) {
