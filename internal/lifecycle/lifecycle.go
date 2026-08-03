@@ -451,6 +451,27 @@ func waitForGPU(ctx context.Context, p provisioner.Provisioner, opts ApplyOpts) 
 // nvidia.com/gpu, with no runtimeClassName, gets no device). nvidia stays
 // non-default, so non-GPU pods run on runc. This is the Q7 RuntimeClass
 // fallback — record it for HOR-306 (ModelBackend vLLM pod spec).
+//
+// Driver upgrade policy (HOR-411): on a single-node inference cluster a pinned
+// driver bump is driven by the gpu-operator's driver.upgradePolicy. By default
+// the operator refuses to delete GPU pods that carry local storage (emptyDir),
+// which stalls the upgrade at pod-deletion-required and leaves the only node
+// cordoned with nvidia.com/gpu-driver-upgrade-state=upgrade-failed. forge pins:
+//
+//   - driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true — let the operator
+//     delete GPU pods that hold emptyDir volumes so the upgrade can progress.
+//   - driver.upgradePolicy.drain.enable=false — never full-node drain. On a
+//     single-node cluster a drain would evict Flux, metrics-server, and the rest
+//     of the control plane; only GPU pods are deleted, by the operator, not by
+//     kubelet eviction.
+//
+// Workload contract: deleteEmptyDir permanently discards emptyDir contents.
+// GPU workload emptyDir volumes MUST contain only disposable data — e.g. the
+// memory-backed /dev/shm used for inference scratch and the in-memory KV cache.
+// Durable data (Hugging Face model cache, etc.) must live on persistent host
+// storage, not in emptyDir. A driver upgrade therefore terminates active GPU
+// inference pods, discards their ephemeral state, and forces a model reload;
+// there is no zero-downtime driver upgrade on a single-node cluster (a non-goal).
 func gpuOperatorValues(g config.GPU) []string {
 	values := []string{
 		"cdi.enabled=true",
@@ -464,6 +485,10 @@ func gpuOperatorValues(g config.GPU) []string {
 		"toolkit.env[1].value=/run/k3s/containerd/containerd.sock",
 		"toolkit.env[2].name=CONTAINERD_RUNTIME_CLASS",
 		"toolkit.env[2].value=nvidia",
+		// HOR-411: unblock driver upgrades on single-node inference clusters
+		// without enabling a full-node drain. See the doc comment above.
+		"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true",
+		"driver.upgradePolicy.drain.enable=false",
 	}
 	if v := strings.TrimSpace(g.Driver.Version); v != "" {
 		values = append(values, "driver.version="+v)
