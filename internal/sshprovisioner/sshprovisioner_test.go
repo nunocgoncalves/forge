@@ -436,50 +436,91 @@ func TestUninstall(t *testing.T) {
 }
 
 func TestExtractChartCRDs(t *testing.T) {
-	raw := `Pulled: ghcr.io/example/chart:1.0.0
+	const preamble = `Pulled: ghcr.io/example/chart:1.0.0
 Digest: sha256:abc123
 ---
 # source comment
----
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  name: examples.example.com
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: not-a-crd
----
-apiVersion: apiextensions.k8s.io/v1
+`
+	const authoritative = `apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+    operator.prometheus.io/version: 0.93.0
+    schema-marker: authoritative
+  name: podmonitors.monitoring.coreos.com
+`
+	const stale = `apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.9.2
+    schema-marker: stale
+  name: podmonitors.monitoring.coreos.com
+`
+	const widget = `apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: widgets.example.com
----
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  name: examples.example.com
-  annotations:
-    duplicate-marker: stale-schema
 `
-	got, err := extractChartCRDs(raw)
+
+	got, err := extractChartCRDs(strings.Join([]string{preamble, authoritative, widget, stale}, "\n---\n"))
 	require.NoError(t, err)
+	reversed, err := extractChartCRDs(strings.Join([]string{preamble, stale, widget, authoritative}, "\n---\n"))
+	require.NoError(t, err)
+
+	assert.Equal(t, got, reversed, "duplicate resolution and output order must not depend on Helm traversal order")
 	assert.NotContains(t, got, "Pulled:")
 	assert.NotContains(t, got, "ConfigMap")
-	assert.Contains(t, got, "name: examples.example.com")
-	assert.Contains(t, got, "name: widgets.example.com")
-	assert.NotContains(t, got, "stale-schema", "the first CRD schema must win like Helm install")
+	assert.Contains(t, got, "schema-marker: authoritative")
+	assert.NotContains(t, got, "schema-marker: stale")
+	assert.Less(t, strings.Index(got, "podmonitors.monitoring.coreos.com"), strings.Index(got, "widgets.example.com"))
 	assert.Equal(t, 2, strings.Count(got, "kind: CustomResourceDefinition"))
 }
 
-func TestExtractChartCRDs_EmptyAndMalformed(t *testing.T) {
+func TestCompareNumericVersions(t *testing.T) {
+	tests := []struct {
+		left, right string
+		want        int
+	}{
+		{left: "0.93.0", right: "0.9.2", want: 1},
+		{left: "v0.93", right: "0.93.0", want: 0},
+		{left: "0.93.0", right: "0.100.0", want: -1},
+	}
+	for _, tt := range tests {
+		got, err := compareNumericVersions(tt.left, tt.right)
+		require.NoError(t, err)
+		assert.Equal(t, tt.want, got, "%s compared with %s", tt.left, tt.right)
+	}
+}
+
+func TestExtractChartCRDs_EmptyMalformedAndAmbiguous(t *testing.T) {
 	got, err := extractChartCRDs("Pulled: example/chart:1.0.0\nDigest: sha256:abc\n")
 	require.NoError(t, err)
 	assert.Empty(t, got)
 
 	_, err = extractChartCRDs("apiVersion: [unterminated\n")
 	require.ErrorContains(t, err, "decode chart CRDs")
+
+	const ambiguous = `apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: examples.example.com
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    schema-marker: conflicting
+  name: examples.example.com
+`
+	_, err = extractChartCRDs(ambiguous)
+	require.ErrorContains(t, err, `conflicting duplicate chart CRD "examples.example.com" has no authoritative version annotation`)
 }
 
 func TestDeployer_Apply(t *testing.T) {

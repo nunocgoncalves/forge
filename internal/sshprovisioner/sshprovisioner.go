@@ -11,6 +11,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -415,24 +417,105 @@ func (p *SSHProvisioner) ensureHelm(ctx context.Context) error {
 	return nil
 }
 
+const prometheusOperatorVersionAnnotation = "operator.prometheus.io/version"
+
 type chartCRDHeader struct {
 	APIVersion string `yaml:"apiVersion"`
 	Kind       string `yaml:"kind"`
 	Metadata   struct {
-		Name string `yaml:"name"`
+		Name        string            `yaml:"name"`
+		Annotations map[string]string `yaml:"annotations"`
 	} `yaml:"metadata"`
 }
 
-// extractChartCRDs removes Helm's OCI pull-status preamble and any comment-only
-// YAML documents from `helm show crds`. Helm 4 writes "Pulled" and "Digest" to
-// stdout for OCI charts, which kubectl otherwise tries to decode as a resource.
-// It also keeps the first occurrence of a CRD name, matching Helm's install
-// behavior when multiple dependencies bundle the same CRD at different schema
-// versions (for example, kube-prometheus-stack and Loki ServiceMonitors).
+type chartCRD struct {
+	header   chartCRDHeader
+	manifest string
+}
+
+// compareNumericVersions compares the dotted numeric versions used by the
+// Prometheus Operator's CRD provenance annotation.
+func compareNumericVersions(a, b string) (int, error) {
+	parse := func(version string) ([]int, error) {
+		parts := strings.Split(strings.TrimPrefix(version, "v"), ".")
+		parsed := make([]int, len(parts))
+		for i, part := range parts {
+			value, err := strconv.Atoi(part)
+			if err != nil {
+				return nil, fmt.Errorf("invalid numeric version %q", version)
+			}
+			parsed[i] = value
+		}
+		return parsed, nil
+	}
+
+	left, err := parse(a)
+	if err != nil {
+		return 0, err
+	}
+	right, err := parse(b)
+	if err != nil {
+		return 0, err
+	}
+	for i := 0; i < max(len(left), len(right)); i++ {
+		var leftPart, rightPart int
+		if i < len(left) {
+			leftPart = left[i]
+		}
+		if i < len(right) {
+			rightPart = right[i]
+		}
+		if leftPart < rightPart {
+			return -1, nil
+		}
+		if leftPart > rightPart {
+			return 1, nil
+		}
+	}
+	return 0, nil
+}
+
+// selectChartCRD resolves conflicting Prometheus Operator CRDs using the
+// operator-owned version annotation. Unknown conflicting duplicates fail rather
+// than allowing Helm's unstable dependency traversal order to choose a schema.
+func selectChartCRD(existing, candidate chartCRD) (chartCRD, error) {
+	if existing.manifest == candidate.manifest {
+		return existing, nil
+	}
+
+	existingVersion := existing.header.Metadata.Annotations[prometheusOperatorVersionAnnotation]
+	candidateVersion := candidate.header.Metadata.Annotations[prometheusOperatorVersionAnnotation]
+	if existingVersion == "" && candidateVersion == "" {
+		return chartCRD{}, fmt.Errorf("conflicting duplicate chart CRD %q has no authoritative version annotation", existing.header.Metadata.Name)
+	}
+	if existingVersion == "" {
+		return candidate, nil
+	}
+	if candidateVersion == "" {
+		return existing, nil
+	}
+
+	comparison, err := compareNumericVersions(existingVersion, candidateVersion)
+	if err != nil {
+		return chartCRD{}, fmt.Errorf("compare duplicate chart CRD %q versions: %w", existing.header.Metadata.Name, err)
+	}
+	if comparison < 0 {
+		return candidate, nil
+	}
+	if comparison > 0 {
+		return existing, nil
+	}
+	return chartCRD{}, fmt.Errorf("conflicting duplicate chart CRD %q has equal authoritative version %q", existing.header.Metadata.Name, existingVersion)
+}
+
+// extractChartCRDs removes Helm's OCI pull-status preamble and any non-CRD YAML
+// documents from `helm show crds`. Helm 4 writes "Pulled" and "Digest" to stdout
+// for OCI charts, which kubectl otherwise tries to decode as a resource. Helm's
+// dependency traversal order is unstable, so duplicate Prometheus Operator CRDs
+// are selected by their operator-owned version and the result is sorted by name.
 func extractChartCRDs(raw string) (string, error) {
 	decoder := yaml.NewDecoder(strings.NewReader(raw))
-	seen := make(map[string]struct{})
-	var manifests []string
+	crds := make(map[string]chartCRD)
 	for {
 		var document yaml.Node
 		if err := decoder.Decode(&document); err != nil {
@@ -451,18 +534,35 @@ func extractChartCRDs(raw string) (string, error) {
 		if header.Metadata.Name == "" {
 			return "", errors.New("chart CRD is missing metadata.name")
 		}
-		if _, duplicate := seen[header.Metadata.Name]; duplicate {
-			continue
+		var resource any
+		if err := document.Decode(&resource); err != nil {
+			return "", fmt.Errorf("decode chart CRD: %w", err)
 		}
-		seen[header.Metadata.Name] = struct{}{}
-		manifest, err := yaml.Marshal(&document)
+		manifest, err := yaml.Marshal(resource)
 		if err != nil {
 			return "", fmt.Errorf("encode chart CRD: %w", err)
 		}
-		manifests = append(manifests, strings.TrimSpace(string(manifest)))
+		candidate := chartCRD{header: header, manifest: strings.TrimSpace(string(manifest))}
+		if existing, duplicate := crds[header.Metadata.Name]; duplicate {
+			candidate, err = selectChartCRD(existing, candidate)
+			if err != nil {
+				return "", err
+			}
+		}
+		crds[header.Metadata.Name] = candidate
 	}
-	if len(manifests) == 0 {
+	if len(crds) == 0 {
 		return "", nil
+	}
+
+	names := make([]string, 0, len(crds))
+	for name := range crds {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	manifests := make([]string, 0, len(names))
+	for _, name := range names {
+		manifests = append(manifests, crds[name].manifest)
 	}
 	return strings.Join(manifests, "\n---\n") + "\n", nil
 }
