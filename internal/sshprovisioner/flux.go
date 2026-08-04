@@ -50,12 +50,14 @@ func (p *SSHProvisioner) UninstallFlux(ctx context.Context) error {
 // GitRepositoryArtifact implements fluxer.Fluxer. It reports the Ready
 // condition plus Flux's exact materialized revision and content digest
 // (HOR-397). Forge never downloads or parses tool code. Missing/not-yet-ready
-// status remains a tolerated zero value for lifecycle polling.
+// status remains a tolerated zero value for lifecycle polling; command and API
+// failures are returned so operators see their cause immediately.
 func (p *SSHProvisioner) GitRepositoryArtifact(ctx context.Context, name string) (fluxer.GitRepositoryArtifact, error) {
 	out, err := p.run(ctx, kubectlCmd("get", "gitrepository", "-n", "flux-system", name,
+		"--ignore-not-found=true",
 		"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}{"\t"}{.status.artifact.revision}{"\t"}{.status.artifact.digest}`))
 	if err != nil {
-		return fluxer.GitRepositoryArtifact{}, nil // CR not present yet or transient error — retry
+		return fluxer.GitRepositoryArtifact{}, fmt.Errorf("get Flux GitRepository %q: %w", name, err)
 	}
 	parts := strings.Split(strings.TrimSpace(out), "\t")
 	if len(parts) == 0 || parts[0] == "" {

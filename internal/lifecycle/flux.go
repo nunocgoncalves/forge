@@ -29,7 +29,10 @@ const (
 // whether overlay.ref is a tag (Flux ref.tag) or a branch (Flux ref.branch).
 // forge's overlay.ref accepts both (git clone --branch works for either); Flux's
 // GitRepository distinguishes the two.
-var semverTagRe = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[0-9A-Za-z-.]+)?$`)
+var (
+	semverTagRe          = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[0-9A-Za-z-.]+)?$`)
+	canonicalSHA256HexRe = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+)
 
 // applyFluxSourcePhase establishes the exact source-controller artifact before
 // Helm starts the tool runner. This breaks the bootstrap cycle in which Helm
@@ -105,6 +108,38 @@ func applyFluxReconciliationPhase(ctx context.Context, cfg *config.Cluster, d de
 	return nil
 }
 
+// validateChartFluxSource prevents Helm from starting a 0.3+ tool runner with
+// no generation source. A skipped/disabled Flux phase is supported only on
+// re-entry when the exact source artifact is already established.
+func validateChartFluxSource(ctx context.Context, cfg *config.Cluster, f fluxer.Fluxer, d deployer.Deployer, opts ApplyOpts, expectedCommit string) error {
+	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" {
+		return nil
+	}
+	requiresSource, err := chartVersionAtLeast(cfg.Spec.Chart.Version, fluxArtifactFirstVersion)
+	if err != nil {
+		return err
+	}
+	if !requiresSource || (cfg.Spec.Flux.Enabled && !opts.SkipFlux) {
+		return nil
+	}
+	if f == nil {
+		return fmt.Errorf("platform chart %q requires an exact Flux artifact before Helm; enable flux or provide an already-established source", cfg.Spec.Chart.Version)
+	}
+	artifact, err := f.GitRepositoryArtifact(ctx, fluxSourceName)
+	if err != nil {
+		return fmt.Errorf("read existing Flux GitRepository artifact: %w", err)
+	}
+	if fluxArtifactMatches(artifact, expectedCommit) {
+		return nil
+	}
+	return fmt.Errorf("platform chart %q requires an exact Ready Flux artifact before Helm; enable flux and do not use --skip-flux for a fresh install", cfg.Spec.Chart.Version)
+}
+
+func fluxArtifactMatches(artifact fluxer.GitRepositoryArtifact, expectedCommit string) bool {
+	return artifact.Ready && canonicalSHA256HexRe.MatchString(artifact.Digest) &&
+		(expectedCommit == "" || strings.HasSuffix(artifact.Revision, ":"+expectedCommit))
+}
+
 func waitForFluxArtifact(ctx context.Context, f fluxer.Fluxer, expectedCommit string, timeout, interval time.Duration) (fluxer.GitRepositoryArtifact, error) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
@@ -116,8 +151,7 @@ func waitForFluxArtifact(ctx context.Context, f fluxer.Fluxer, expectedCommit st
 		if err != nil {
 			return fluxer.GitRepositoryArtifact{}, fmt.Errorf("read Flux GitRepository artifact: %w", err)
 		}
-		if artifact.Ready && artifact.Digest != "" && strings.HasPrefix(artifact.Digest, "sha256:") &&
-			(expectedCommit == "" || strings.HasSuffix(artifact.Revision, ":"+expectedCommit)) {
+		if fluxArtifactMatches(artifact, expectedCommit) {
 			return artifact, nil
 		}
 
@@ -125,7 +159,7 @@ func waitForFluxArtifact(ctx context.Context, f fluxer.Fluxer, expectedCommit st
 		case <-ctx.Done():
 			return fluxer.GitRepositoryArtifact{}, ctx.Err()
 		case <-deadline.C:
-			return fluxer.GitRepositoryArtifact{}, fmt.Errorf("flux GitRepository %q did not publish Ready commit %q with a sha256 digest within %s", fluxSourceName, expectedCommit, timeout)
+			return fluxer.GitRepositoryArtifact{}, fmt.Errorf("flux GitRepository %q did not publish Ready commit %q with a canonical sha256 digest within %s", fluxSourceName, expectedCommit, timeout)
 		case <-ticker.C:
 		}
 	}
