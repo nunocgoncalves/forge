@@ -56,11 +56,12 @@ func runInternalTLS(t *testing.T) {
 	// — not needed to prove internal TLS, and they'd need a MetalLB pool on kind.
 	// Keep control-plane + Postgres + Redis + gateway + cert-manager + cert-issuers.
 	edgeOff := map[string]string{
-		"ingress-nginx.enabled":  "false",
-		"metallb.enabled":        "false",
-		"metallb-config.enabled": "false",
-		"external-dns.enabled":   "false",
-		"minio.enabled":          "false",
+		"ingress-nginx.enabled":          "false",
+		"metallb.enabled":                "false",
+		"metallb-config.enabled":         "false",
+		"external-dns.enabled":           "false",
+		"minio.enabled":                  "false",
+		"control-plane.artifact.enabled": "false",
 	}
 
 	// 1. Kind cluster.
