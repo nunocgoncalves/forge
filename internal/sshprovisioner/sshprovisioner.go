@@ -637,6 +637,27 @@ func (p *SSHProvisioner) Status(ctx context.Context, release, namespace string) 
 	return parseHelmStatus(out)
 }
 
+const crdOwnershipJSONPath = `{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.meta\.helm\.sh/release-name}{"\t"}{.metadata.annotations.meta\.helm\.sh/release-namespace}{"\n"}{end}`
+
+// CRDOwnedBy implements deployer.Deployer from live Helm ownership annotations.
+func (p *SSHProvisioner) CRDOwnedBy(ctx context.Context, labelSelector, release, namespace string) (bool, error) {
+	out, err := p.run(ctx, kubectlCmd("get", "crd", "-l", labelSelector, "-o", "jsonpath="+crdOwnershipJSONPath))
+	if err != nil {
+		return false, fmt.Errorf("read CRD ownership: %w", err)
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return false, nil
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 3 || fields[0] == "" || fields[1] != release || fields[2] != namespace {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // TransferCRDOwnership implements deployer.Deployer. Kept CRDs survive the old
 // platform release's upgrade, but retain its Helm ownership annotations. Move
 // only those metadata fields so the companion chart can adopt the same objects

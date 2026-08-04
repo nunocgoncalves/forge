@@ -305,7 +305,18 @@ func certificateOwnershipMigrationRequired(ctx context.Context, d deployer.Deplo
 	if err != nil {
 		return false, fmt.Errorf("installed platform release: %w", err)
 	}
-	return semver.Compare(have, "v"+certificateSubstrateFirstVersion) < 0, nil
+	if semver.Compare(have, "v"+certificateSubstrateFirstVersion) < 0 {
+		return true, nil
+	}
+
+	// A 0.3 platform with CRDs still owned by the platform release is an
+	// interrupted hand-off, not a completed migration. Derive that checkpoint
+	// from the live annotations so a failed or partial transfer resumes.
+	owned, err := d.CRDOwnedBy(ctx, certificateCRDLabelSelector, certificateSubstrateRelease(ch.Release), ch.Namespace)
+	if err != nil {
+		return false, fmt.Errorf("read certificate CRD ownership migration state: %w", err)
+	}
+	return !owned, nil
 }
 
 // applyCertificateSubstrate installs the same-version companion release before

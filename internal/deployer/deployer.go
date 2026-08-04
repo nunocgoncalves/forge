@@ -42,6 +42,9 @@ type Deployer interface {
 	EnsureRepo(ctx context.Context, name, url string) error
 	// Status reads the helm release state. A missing release is not an error.
 	Status(ctx context.Context, release, namespace string) (*ChartState, error)
+	// CRDOwnedBy reports whether every CRD selected by label carries the given
+	// Helm release ownership annotations. An empty selection reports false.
+	CRDOwnedBy(ctx context.Context, labelSelector, release, namespace string) (bool, error)
 	// TransferCRDOwnership annotates CRDs selected by label for adoption by a
 	// different Helm release. Used only for the platform 0.2.x -> 0.3 substrate
 	// ownership hand-off; CRD contents and custom resources are left untouched.
