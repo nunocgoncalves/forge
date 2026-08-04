@@ -47,17 +47,28 @@ func (p *SSHProvisioner) UninstallFlux(ctx context.Context) error {
 	return nil
 }
 
-// GitRepositoryStatus implements fluxer.Fluxer. Reads the Ready condition of the
-// forge-applied GitRepository (informational; never gates apply). Returns ("",
-// nil) when the CR/source is not yet present or on a transient error so a
-// best-effort status read never fails the apply.
+// GitRepositoryStatus implements fluxer.Fluxer. It reports the Ready condition
+// plus Flux's exact materialized revision and content digest (HOR-397). This is
+// informational and never gates apply; Forge neither downloads nor parses tool
+// code. Missing/not-yet-ready status remains a tolerated empty result.
 func (p *SSHProvisioner) GitRepositoryStatus(ctx context.Context, name string) (string, error) {
 	out, err := p.run(ctx, kubectlCmd("get", "gitrepository", "-n", "flux-system", name,
-		"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}`))
+		"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}{"\t"}{.status.artifact.revision}{"\t"}{.status.artifact.digest}`))
 	if err != nil {
 		return "", nil // CR not present yet or transient error — tolerate
 	}
-	return strings.TrimSpace(out), nil
+	parts := strings.Split(strings.TrimSpace(out), "\t")
+	if len(parts) == 0 || parts[0] == "" {
+		return "", nil
+	}
+	status := "ready=" + parts[0]
+	if len(parts) > 1 && parts[1] != "" {
+		status += " revision=" + parts[1]
+	}
+	if len(parts) > 2 && parts[2] != "" {
+		status += " digest=" + parts[2]
+	}
+	return status, nil
 }
 
 // fluxCmd builds a sudo flux command targeting the k3s kubeconfig on the host.
