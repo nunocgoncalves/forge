@@ -435,12 +435,65 @@ func TestUninstall(t *testing.T) {
 	assert.Equal(t, "sudo /usr/local/bin/k3s-uninstall.sh", got)
 }
 
+func TestExtractChartCRDs(t *testing.T) {
+	raw := `Pulled: ghcr.io/example/chart:1.0.0
+Digest: sha256:abc123
+---
+# source comment
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: examples.example.com
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: not-a-crd
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: widgets.example.com
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: examples.example.com
+  annotations:
+    duplicate-marker: stale-schema
+`
+	got, err := extractChartCRDs(raw)
+	require.NoError(t, err)
+	assert.NotContains(t, got, "Pulled:")
+	assert.NotContains(t, got, "ConfigMap")
+	assert.Contains(t, got, "name: examples.example.com")
+	assert.Contains(t, got, "name: widgets.example.com")
+	assert.NotContains(t, got, "stale-schema", "the first CRD schema must win like Helm install")
+	assert.Equal(t, 2, strings.Count(got, "kind: CustomResourceDefinition"))
+}
+
+func TestExtractChartCRDs_EmptyAndMalformed(t *testing.T) {
+	got, err := extractChartCRDs("Pulled: example/chart:1.0.0\nDigest: sha256:abc\n")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+
+	_, err = extractChartCRDs("apiVersion: [unterminated\n")
+	require.ErrorContains(t, err, "decode chart CRDs")
+}
+
 func TestDeployer_Apply(t *testing.T) {
 	var got string
+	var kubectlCalled bool
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
 		case cmd == "command -v helm":
 			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "'show' 'crds'"):
+			return "", 0 // charts without CRDs are a no-op
+		case strings.Contains(cmd, "kubectl"):
+			kubectlCalled = true
+			return "", 0
 		case strings.Contains(cmd, "upgrade"):
 			got = cmd
 			return "", 0
@@ -456,9 +509,100 @@ func TestDeployer_Apply(t *testing.T) {
 		Version: "0.1.0", Namespace: "iterabase-system",
 		Values: []string{"driver.enabled=true", "toolkit.enabled=true"},
 	}))
+	assert.False(t, kubectlCalled, "an empty helm show crds result must skip kubectl")
 	assert.Contains(t, got, "--set")
 	assert.Contains(t, got, "driver.enabled=true")
 	assert.Contains(t, got, "toolkit.enabled=true")
+}
+
+func TestDeployer_Apply_ReconcilesCRDsBeforeUpgrade(t *testing.T) {
+	const crds = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: examples.example.com\n"
+	var commands []string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		commands = append(commands, cmd)
+		switch {
+		case cmd == "command -v helm":
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "'show' 'crds'"):
+			return crds, 0
+		case strings.Contains(cmd, "'kubectl' 'apply'"):
+			return "customresourcedefinition.apiextensions.k8s.io/examples.example.com serverside-applied\n", 0
+		case strings.Contains(cmd, "'kubectl' 'wait'"):
+			return "customresourcedefinition.apiextensions.k8s.io/examples.example.com condition met\n", 0
+		case strings.Contains(cmd, "'upgrade' '--install'"):
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.Apply(context.Background(), deployer.ApplyOpts{
+		Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
+		Version: "0.1.27", Namespace: "iterabase-system",
+	}))
+
+	require.Len(t, commands, 5)
+	assert.Equal(t, "command -v helm", commands[0])
+	assert.Contains(t, commands[1], "'show' 'crds' 'oci://ghcr.io/nunocgoncalves/iterabase-platform' '--version' '0.1.27'")
+	assert.Contains(t, commands[2], "'kubectl' 'apply' '--server-side' '--force-conflicts' '-f' '-'")
+	assert.Contains(t, commands[3], "'kubectl' 'wait' '--for=condition=Established' '--timeout=2m' '-f' '-'")
+	assert.Contains(t, commands[4], "'upgrade' '--install'")
+}
+
+func TestDeployer_Apply_CRDFailuresStopBeforeUpgrade(t *testing.T) {
+	const crds = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: examples.example.com\n"
+	tests := []struct {
+		name       string
+		failAt     string
+		wantErr    string
+		showOutput string
+	}{
+		{name: "discover", failAt: "show", wantErr: "discover chart CRDs"},
+		{name: "apply", failAt: "apply", wantErr: "apply chart CRDs", showOutput: crds},
+		{name: "wait", failAt: "wait", wantErr: "wait for chart CRDs", showOutput: crds},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upgradeCalled := false
+			addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+				switch {
+				case cmd == "command -v helm":
+					return "/usr/local/bin/helm\n", 0
+				case strings.Contains(cmd, "'show' 'crds'"):
+					if tt.failAt == "show" {
+						return "", 1
+					}
+					return tt.showOutput, 0
+				case strings.Contains(cmd, "'kubectl' 'apply'"):
+					if tt.failAt == "apply" {
+						return "", 1
+					}
+					return "", 0
+				case strings.Contains(cmd, "'kubectl' 'wait'"):
+					if tt.failAt == "wait" {
+						return "", 1
+					}
+					return "", 0
+				case strings.Contains(cmd, "'upgrade' '--install'"):
+					upgradeCalled = true
+					return "", 0
+				default:
+					return "", 1
+				}
+			})
+			defer cleanup()
+			p := newProvisioner(t, addr, cfg)
+			defer p.Close()
+			err := p.Apply(context.Background(), deployer.ApplyOpts{
+				Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
+				Version: "0.1.27", Namespace: "iterabase-system",
+			})
+			require.ErrorContains(t, err, tt.wantErr)
+			assert.False(t, upgradeCalled)
+		})
+	}
 }
 
 func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
@@ -468,6 +612,8 @@ func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 			return "", 1 // absent
 		case strings.Contains(cmd, "get-helm-4"):
 			return "", 0 // install script
+		case strings.Contains(cmd, "'show' 'crds'"):
+			return "", 0
 		case strings.Contains(cmd, "upgrade"):
 			return "", 0
 		default:
