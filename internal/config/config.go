@@ -167,7 +167,7 @@ func (o Overlay) validate() error {
 // Chart is the platform umbrella chart pull pointer. An empty Version means
 // the chart phase is skipped (k3s-only). Defaults are applied in Validate.
 type Chart struct {
-	Repository string `yaml:"repository"` // OCI URL, e.g. oci://ghcr.io/.../iterabase-platform
+	Repository string `yaml:"repository"` // OCI URL ending /iterabase-platform; Forge installs the same-version /cert-manager-substrate companion first
 	Version    string `yaml:"version"`    // chart version (semver) to install; empty => skip chart
 	Release    string `yaml:"release"`    // helm release name (default: metadata.name)
 	Namespace  string `yaml:"namespace"`  // target namespace (default: iterabase-system)

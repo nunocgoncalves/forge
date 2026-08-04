@@ -66,18 +66,19 @@ type ReconcilePlan struct {
 
 // Result is the outcome of a mutating apply.
 type Result struct {
-	Plan                *ReconcilePlan
-	KubeconfigPath      string
-	NodeReady           bool
-	ChartApplied        bool
-	GPUOperatorApplied  bool   // nvidia/gpu-operator release installed/upgraded
-	GPUDriverVersion    string // nvidia driver version pinned via driver.version (empty => chart default)
-	GPUReady            bool   // ClusterPolicy reached state=ready (the GPU readiness gate)
-	OverlayApplied      bool   // overlay cloned + chart applied with overlay values + CRD instances applied
-	OverlayCommit       string // resolved overlay commit SHA
-	SecretsApplied      bool   // declared Secrets materialized from operator env vars
-	FluxInstalled       bool   // Flux components installed + GitRepository/Kustomization applied
-	GitRepositoryStatus string // informational Ready status of the forge-applied GitRepository (best-effort)
+	Plan                        *ReconcilePlan
+	KubeconfigPath              string
+	NodeReady                   bool
+	CertificateSubstrateApplied bool
+	ChartApplied                bool
+	GPUOperatorApplied          bool   // nvidia/gpu-operator release installed/upgraded
+	GPUDriverVersion            string // nvidia driver version pinned via driver.version (empty => chart default)
+	GPUReady                    bool   // ClusterPolicy reached state=ready (the GPU readiness gate)
+	OverlayApplied              bool   // overlay cloned + chart applied with overlay values + CRD instances applied
+	OverlayCommit               string // resolved overlay commit SHA
+	SecretsApplied              bool   // declared Secrets materialized from operator env vars
+	FluxInstalled               bool   // Flux components installed + GitRepository/Kustomization applied
+	GitRepositoryStatus         string // gated Ready revision/digest of the forge-applied GitRepository
 }
 
 // ApplyOpts configures an apply run.
@@ -234,15 +235,10 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		return res, err
 	}
 
-	// Overlay phase: clone → secret-sync → chart → CRD instances.
-	if err := applyOverlayPhase(ctx, cfg, o, d, opts, res); err != nil {
-		return res, err
-	}
-
-	// Flux phase: install Flux + apply GitRepository/Kustomization (continuous
-	// reconciliation of the overlay contents). Runs last (substrate + one-time
-	// overlay before continuous).
-	if err := applyFluxPhase(ctx, cfg, f, d, opts, res); err != nil {
+	// Overlay delivery is deliberately phased: clone + secrets, certificate
+	// substrate, exact Flux source artifact, platform chart, CR instances, then
+	// enable continuous Flux reconciliation.
+	if err := applyOverlayPhase(ctx, cfg, o, f, d, opts, res); err != nil {
 		return res, err
 	}
 
@@ -250,6 +246,53 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		Action: "apply", Result: "success", Version: version.String(),
 	})
 	return res, nil
+}
+
+const certificateSubstrateChart = "cert-manager-substrate"
+
+func certificateSubstrateRepository(platformRepository string) (string, error) {
+	i := strings.LastIndex(platformRepository, "/")
+	if i < 0 || platformRepository[i+1:] != "iterabase-platform" {
+		return "", fmt.Errorf("platform chart repository %q must end in /iterabase-platform to resolve its certificate substrate companion", platformRepository)
+	}
+	return platformRepository[:i+1] + certificateSubstrateChart, nil
+}
+
+func certificateSubstrateRelease(platformRelease string) string {
+	return platformRelease + "-cert-manager"
+}
+
+// applyCertificateSubstrate installs the same-version companion release before
+// any cert-manager custom resources. The release contains only the operator,
+// CRDs, webhook, and CSI driver, so its --wait boundary is the readiness DAG
+// Helm cannot express between dependencies in one umbrella release.
+func applyCertificateSubstrate(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string) error {
+	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" {
+		return nil
+	}
+	ch := cfg.Spec.Chart
+	repository, err := certificateSubstrateRepository(ch.Repository)
+	if err != nil {
+		return err
+	}
+	dopts := deployer.ApplyOpts{
+		Release:    certificateSubstrateRelease(ch.Release),
+		Repository: repository,
+		Version:    ch.Version,
+		Namespace:  ch.Namespace,
+		// The platform observability chart owns this cross-release monitor. Keep
+		// substrate installation independent of Prometheus Operator CRDs.
+		Values: []string{"cert-manager.prometheus.servicemonitor.enabled=false"},
+	}
+	if overlayDest != "" {
+		dopts.ValueFiles = overlayValueFiles(overlayDest)
+	}
+	if err := d.Apply(ctx, dopts); err != nil {
+		auditFail(cfg, "apply-certificate-substrate", err)
+		return fmt.Errorf("certificate substrate: %w", err)
+	}
+	res.CertificateSubstrateApplied = true
+	return nil
 }
 
 // applyChart runs the platform chart phase (helm upgrade --install) when a chart
@@ -312,11 +355,11 @@ func applyCRDInstances(ctx context.Context, d deployer.Deployer, overlayDest str
 	return nil
 }
 
-// applyOverlayPhase runs the overlay phase: clone the client fork → secret-sync
-// (reads the overlay's secrets.yaml) → chart with overlay values → CRD
-// instances. Each step no-ops when unconfigured/skipped. Runs after GPU
-// readiness (substrate before app).
-func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Overlayer, d deployer.Deployer, opts ApplyOpts, res *Result) error {
+// applyOverlayPhase runs the ordered delivery path: clone the client fork →
+// secrets → certificate substrate → Flux source → platform → CRs → Flux
+// Kustomization. The source precedes Helm because the chart-managed tool runner
+// is intentionally unready until it loads a valid generation.
+func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Overlayer, f fluxer.Fluxer, d deployer.Deployer, opts ApplyOpts, res *Result) error {
 	overlayDest, overlayCommit, err := cloneOverlay(ctx, cfg, o, opts)
 	if err != nil {
 		auditFail(cfg, "apply-overlay", err)
@@ -327,11 +370,20 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 		auditFail(cfg, "apply-secrets", err)
 		return err
 	}
+	if err := applyCertificateSubstrate(ctx, cfg, d, opts, res, overlayDest); err != nil {
+		return err
+	}
+	if err := applyFluxSourcePhase(ctx, cfg, f, d, opts, res, overlayCommit); err != nil {
+		return err
+	}
 	if err := applyChart(ctx, cfg, d, opts, res, overlayDest); err != nil {
 		return err
 	}
 	if err := applyCRDInstances(ctx, d, overlayDest); err != nil {
 		auditFail(cfg, "apply-overlay", err)
+		return err
+	}
+	if err := applyFluxReconciliationPhase(ctx, cfg, d, opts); err != nil {
 		return err
 	}
 	res.OverlayApplied = overlayDest != ""
@@ -514,6 +566,7 @@ func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 	if d != nil && cfg.Spec.Chart.Version != "" {
 		ch := cfg.Spec.Chart
 		_ = d.UninstallChart(ctx, ch.Release, ch.Namespace)
+		_ = d.UninstallChart(ctx, certificateSubstrateRelease(ch.Release), ch.Namespace)
 	}
 	if d != nil && cfg.Spec.GPU.Enabled {
 		g := cfg.Spec.GPU.Operator

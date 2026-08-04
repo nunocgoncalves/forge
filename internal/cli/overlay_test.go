@@ -117,7 +117,7 @@ func TestPrintApplyResult_FluxNotReady(t *testing.T) {
 	}
 	res := &lifecycle.Result{Plan: &lifecycle.ReconcilePlan{}, FluxInstalled: true, GitRepositoryStatus: ""} // not reconciled yet
 	printApplyResult(&out, cfg, res)
-	assert.Contains(t, out.String(), "not ready yet")
+	assert.Contains(t, out.String(), "not reconciled in this run")
 }
 
 func TestPrintApplyResult_FluxDisabled(t *testing.T) {
