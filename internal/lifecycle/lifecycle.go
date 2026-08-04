@@ -375,6 +375,27 @@ func applyChart(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, o
 	return nil
 }
 
+// migrateCertificateOwnership performs the one-time platform-first hand-off
+// from the <=0.2.2 bundled cert-manager resources to the 0.3 companion release.
+func migrateCertificateOwnership(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string) error {
+	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" {
+		return nil
+	}
+	migration, err := certificateOwnershipMigrationRequired(ctx, d, cfg.Spec.Chart)
+	if err != nil || !migration {
+		return err
+	}
+	if err := applyChart(ctx, cfg, d, opts, res, overlayDest, "control-plane.toolRunner.enabled=false"); err != nil {
+		return err
+	}
+	ch := cfg.Spec.Chart
+	if err := d.TransferCRDOwnership(ctx, certificateCRDLabelSelector, certificateSubstrateRelease(ch.Release), ch.Namespace); err != nil {
+		auditFail(cfg, "migrate-certificate-substrate-ownership", err)
+		return fmt.Errorf("certificate substrate ownership migration: %w", err)
+	}
+	return nil
+}
+
 // cloneOverlay clones the client fork when overlay.repo is configured, returning
 // the host dest path + resolved commit. Returns ("", "", nil) when the overlay
 // phase is skipped (no repo, SkipOverlay). Errors if a repo is set but no
@@ -434,22 +455,8 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 	// Upgrade the old owner with the new runner deferred, transfer only the kept
 	// CRD annotations, then install the companion. The normal platform apply
 	// below restores the overlay's intended runner value after Flux is Ready.
-	migration := false
-	if d != nil && !opts.SkipChart && cfg.Spec.Chart.Version != "" {
-		migration, err = certificateOwnershipMigrationRequired(ctx, d, cfg.Spec.Chart)
-		if err != nil {
-			return err
-		}
-	}
-	if migration {
-		if err := applyChart(ctx, cfg, d, opts, res, overlayDest, "control-plane.toolRunner.enabled=false"); err != nil {
-			return err
-		}
-		ch := cfg.Spec.Chart
-		if err := d.TransferCRDOwnership(ctx, certificateCRDLabelSelector, certificateSubstrateRelease(ch.Release), ch.Namespace); err != nil {
-			auditFail(cfg, "migrate-certificate-substrate-ownership", err)
-			return fmt.Errorf("certificate substrate ownership migration: %w", err)
-		}
+	if err := migrateCertificateOwnership(ctx, cfg, d, opts, res, overlayDest); err != nil {
+		return err
 	}
 	if err := applyCertificateSubstrate(ctx, cfg, d, opts, res, overlayDest); err != nil {
 		return err
