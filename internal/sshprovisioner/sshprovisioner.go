@@ -637,6 +637,30 @@ func (p *SSHProvisioner) Status(ctx context.Context, release, namespace string) 
 	return parseHelmStatus(out)
 }
 
+// TransferCRDOwnership implements deployer.Deployer. Kept CRDs survive the old
+// platform release's upgrade, but retain its Helm ownership annotations. Move
+// only those metadata fields so the companion chart can adopt the same objects
+// without deleting certificates or relying on Helm --take-ownership support.
+func (p *SSHProvisioner) TransferCRDOwnership(ctx context.Context, labelSelector, release, namespace string) error {
+	out, err := p.run(ctx, kubectlCmd("get", "crd", "-l", labelSelector, "-o", "name"))
+	if err != nil {
+		return fmt.Errorf("list CRDs for ownership transfer: %w", err)
+	}
+	resources := strings.Fields(out)
+	if len(resources) == 0 {
+		return fmt.Errorf("no CRDs match ownership-transfer selector %q", labelSelector)
+	}
+	args := append([]string{"annotate", "--overwrite"}, resources...)
+	args = append(args,
+		"meta.helm.sh/release-name="+release,
+		"meta.helm.sh/release-namespace="+namespace,
+	)
+	if _, err := p.run(ctx, kubectlCmd(args...)); err != nil {
+		return fmt.Errorf("transfer CRD ownership to %s/%s: %w", namespace, release, err)
+	}
+	return nil
+}
+
 // UninstallChart implements deployer.Deployer. Best-effort: a missing release
 // (or absent helm) is not an error so destroy always proceeds to k3s removal.
 func (p *SSHProvisioner) UninstallChart(ctx context.Context, release, namespace string) error {

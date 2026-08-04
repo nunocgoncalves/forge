@@ -710,6 +710,29 @@ func TestDeployer_Status_NotInstalled(t *testing.T) {
 	assert.False(t, st.Installed)
 }
 
+func TestDeployer_TransferCRDOwnership(t *testing.T) {
+	var annotate string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case strings.Contains(cmd, "'get' 'crd'"):
+			return "customresourcedefinition.apiextensions.k8s.io/certificates.cert-manager.io\ncustomresourcedefinition.apiextensions.k8s.io/issuers.cert-manager.io\n", 0
+		case strings.Contains(cmd, "'annotate' '--overwrite'"):
+			annotate = cmd
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.TransferCRDOwnership(context.Background(),
+		"app.kubernetes.io/name=cert-manager", "opo1-cert-manager", "iterabase-system"))
+	assert.Contains(t, annotate, "'customresourcedefinition.apiextensions.k8s.io/certificates.cert-manager.io'")
+	assert.Contains(t, annotate, "'meta.helm.sh/release-name=opo1-cert-manager'")
+	assert.Contains(t, annotate, "'meta.helm.sh/release-namespace=iterabase-system'")
+}
+
 func TestDeployer_UninstallChart(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {

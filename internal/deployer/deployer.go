@@ -42,7 +42,11 @@ type Deployer interface {
 	EnsureRepo(ctx context.Context, name, url string) error
 	// Status reads the helm release state. A missing release is not an error.
 	Status(ctx context.Context, release, namespace string) (*ChartState, error)
-	// UninstallChart removes the helm release. A missing release is not an error.
+	// TransferCRDOwnership annotates CRDs selected by label for adoption by a
+	// different Helm release. Used only for the platform 0.2.x -> 0.3 substrate
+	// ownership hand-off; CRD contents and custom resources are left untouched.
+	TransferCRDOwnership(ctx context.Context, labelSelector, release, namespace string) error
+	// UninstallChart removes the Helm release. A missing release is not an error.
 	UninstallChart(ctx context.Context, release, namespace string) error
 	// ApplyKustomize runs `kubectl apply -k dir` against the k3s kubeconfig on
 	// the host. Used for overlay CRD instances (kubectl apply -k crds/client/),
