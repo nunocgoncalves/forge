@@ -6,9 +6,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/mod/semver"
 
 	"github.com/nunocgoncalves/forge/internal/artifacts"
 	"github.com/nunocgoncalves/forge/internal/config"
@@ -252,38 +253,27 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 const (
 	certificateSubstrateChart        = "cert-manager-substrate"
 	certificateSubstrateFirstVersion = "0.3.0"
+	fluxArtifactFirstVersion         = "0.3.0"
 )
 
-func numericChartVersion(version string) (major, minor, patch int, err error) {
-	core := strings.SplitN(strings.TrimPrefix(version, "v"), "-", 2)[0]
-	parts := strings.Split(core, ".")
-	if len(parts) != 3 {
-		return 0, 0, 0, fmt.Errorf("invalid chart version %q", version)
+func canonicalChartVersion(version string) (string, error) {
+	canonical := "v" + strings.TrimPrefix(version, "v")
+	if !semver.IsValid(canonical) {
+		return "", fmt.Errorf("invalid chart version %q: must be SemVer", version)
 	}
-	values := []*int{&major, &minor, &patch}
-	for i, part := range parts {
-		value, parseErr := strconv.Atoi(part)
-		if parseErr != nil || value < 0 {
-			return 0, 0, 0, fmt.Errorf("invalid chart version %q", version)
-		}
-		*values[i] = value
-	}
-	return major, minor, patch, nil
+	return canonical, nil
 }
 
-func certificateSubstrateRequired(version string) (bool, error) {
-	major, minor, patch, err := numericChartVersion(version)
+func chartVersionAtLeast(version, boundary string) (bool, error) {
+	canonical, err := canonicalChartVersion(version)
 	if err != nil {
 		return false, err
 	}
-	firstMajor, firstMinor, firstPatch, _ := numericChartVersion(certificateSubstrateFirstVersion)
-	if major != firstMajor {
-		return major > firstMajor, nil
-	}
-	if minor != firstMinor {
-		return minor > firstMinor, nil
-	}
-	return patch >= firstPatch, nil
+	return semver.Compare(canonical, "v"+boundary) >= 0, nil
+}
+
+func certificateSubstrateRequired(version string) (bool, error) {
+	return chartVersionAtLeast(version, certificateSubstrateFirstVersion)
 }
 
 func certificateSubstrateRepository(platformRepository string) (string, error) {
@@ -409,6 +399,10 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 		return err
 	}
 	res.OverlayCommit = overlayCommit
+	if err := validateChartFluxSource(ctx, cfg, f, d, opts, overlayCommit); err != nil {
+		auditFail(cfg, "apply-flux", err)
+		return err
+	}
 	if err := applySecrets(ctx, o, d, opts, res, overlayDest); err != nil {
 		auditFail(cfg, "apply-secrets", err)
 		return err

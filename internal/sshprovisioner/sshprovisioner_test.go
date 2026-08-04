@@ -1245,11 +1245,14 @@ func TestFluxer_GitRepositoryArtifact(t *testing.T) {
 	assert.Contains(t, got, "gitrepository")
 	assert.Contains(t, got, "flux-system")
 	assert.Contains(t, got, "overlay")
+	assert.Contains(t, got, "--ignore-not-found=true")
 }
 
 func TestFluxer_GitRepositoryArtifact_NotPresent(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
-		// kubectl errors (CR not present yet) => tolerated as empty.
+		if strings.Contains(cmd, "--ignore-not-found=true") {
+			return "", 0 // absent CR is a successful empty read
+		}
 		return "", 1
 	})
 	defer cleanup()
@@ -1260,4 +1263,17 @@ func TestFluxer_GitRepositoryArtifact_NotPresent(t *testing.T) {
 	assert.False(t, artifact.Ready)
 	assert.Empty(t, artifact.Revision)
 	assert.Empty(t, artifact.Digest)
+}
+
+func TestFluxer_GitRepositoryArtifact_CommandFailure(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(string) (string, int) {
+		return "forbidden", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+
+	_, err := p.GitRepositoryArtifact(context.Background(), "overlay")
+	require.ErrorContains(t, err, `get Flux GitRepository "overlay"`)
+	assert.Contains(t, err.Error(), "ssh run", "the underlying kubectl/SSH failure remains visible")
 }
