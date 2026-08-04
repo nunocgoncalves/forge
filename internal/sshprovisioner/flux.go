@@ -47,28 +47,28 @@ func (p *SSHProvisioner) UninstallFlux(ctx context.Context) error {
 	return nil
 }
 
-// GitRepositoryStatus implements fluxer.Fluxer. It reports the Ready condition
-// plus Flux's exact materialized revision and content digest (HOR-397). This is
-// informational and never gates apply; Forge neither downloads nor parses tool
-// code. Missing/not-yet-ready status remains a tolerated empty result.
-func (p *SSHProvisioner) GitRepositoryStatus(ctx context.Context, name string) (string, error) {
+// GitRepositoryArtifact implements fluxer.Fluxer. It reports the Ready
+// condition plus Flux's exact materialized revision and content digest
+// (HOR-397). Forge never downloads or parses tool code. Missing/not-yet-ready
+// status remains a tolerated zero value for lifecycle polling.
+func (p *SSHProvisioner) GitRepositoryArtifact(ctx context.Context, name string) (fluxer.GitRepositoryArtifact, error) {
 	out, err := p.run(ctx, kubectlCmd("get", "gitrepository", "-n", "flux-system", name,
 		"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}{"\t"}{.status.artifact.revision}{"\t"}{.status.artifact.digest}`))
 	if err != nil {
-		return "", nil // CR not present yet or transient error — tolerate
+		return fluxer.GitRepositoryArtifact{}, nil // CR not present yet or transient error — retry
 	}
 	parts := strings.Split(strings.TrimSpace(out), "\t")
 	if len(parts) == 0 || parts[0] == "" {
-		return "", nil
+		return fluxer.GitRepositoryArtifact{}, nil
 	}
-	status := "ready=" + parts[0]
-	if len(parts) > 1 && parts[1] != "" {
-		status += " revision=" + parts[1]
+	artifact := fluxer.GitRepositoryArtifact{Ready: parts[0] == "True"}
+	if len(parts) > 1 {
+		artifact.Revision = parts[1]
 	}
-	if len(parts) > 2 && parts[2] != "" {
-		status += " digest=" + parts[2]
+	if len(parts) > 2 {
+		artifact.Digest = parts[2]
 	}
-	return status, nil
+	return artifact, nil
 }
 
 // fluxCmd builds a sudo flux command targeting the k3s kubeconfig on the host.

@@ -8,6 +8,14 @@ package fluxer
 
 import "context"
 
+// GitRepositoryArtifact is the exact source-controller artifact state Forge
+// gates on before starting workloads that consume the artifact server.
+type GitRepositoryArtifact struct {
+	Ready    bool
+	Revision string
+	Digest   string
+}
+
 // Fluxer abstracts host-level Flux GitOps toolkit operations. One instance is
 // bound to the same host as the Provisioner/Deployer/Overlayer; the flux CLI
 // runs there over SSH against the k3s kubeconfig.
@@ -24,9 +32,9 @@ type Fluxer interface {
 	// Flux install or absent flux CLI is not an error so destroy always proceeds
 	// to substrate removal.
 	UninstallFlux(ctx context.Context) error
-	// GitRepositoryStatus reads the Ready condition of the forge-applied
-	// GitRepository (informational; never gates apply — Flux reconciles async).
-	// Returns ("", nil) when the CR/source is not yet present or on a transient
-	// error, so a best-effort status read never fails the apply.
-	GitRepositoryStatus(ctx context.Context, name string) (string, error)
+	// GitRepositoryArtifact reads the Ready condition and exact revision/digest
+	// of the forge-applied source. A missing/not-yet-ready source returns a zero
+	// value so lifecycle polling can retry without treating convergence as an
+	// API failure.
+	GitRepositoryArtifact(ctx context.Context, name string) (GitRepositoryArtifact, error)
 }

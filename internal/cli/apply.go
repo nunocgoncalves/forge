@@ -107,6 +107,7 @@ func printApplyResult(out io.Writer, cfg *config.Cluster, res *lifecycle.Result)
 	fmt.Fprintf(out, "  node ready: %v\n", res.NodeReady)
 	if cfg.Spec.Chart.Version != "" {
 		fmt.Fprintf(out, "  chart:      %s\n", cfg.Spec.Chart.Version)
+		fmt.Fprintf(out, "  certificate substrate applied: %v\n", res.CertificateSubstrateApplied)
 		fmt.Fprintf(out, "  chart applied: %v\n", res.ChartApplied)
 	}
 	if cfg.Spec.GPU.Enabled {
@@ -134,7 +135,7 @@ func printApplyResult(out io.Writer, cfg *config.Cluster, res *lifecycle.Result)
 		if res.GitRepositoryStatus != "" {
 			fmt.Fprintf(out, "  gitrepository: %s\n", res.GitRepositoryStatus)
 		} else {
-			fmt.Fprintf(out, "  gitrepository: (not ready yet — Flux reconciles async)\n")
+			fmt.Fprintf(out, "  gitrepository: (not reconciled in this run)\n")
 		}
 	}
 }

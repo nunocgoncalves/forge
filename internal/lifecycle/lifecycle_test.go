@@ -14,6 +14,7 @@ import (
 
 	"github.com/nunocgoncalves/forge/internal/config"
 	"github.com/nunocgoncalves/forge/internal/deployer"
+	"github.com/nunocgoncalves/forge/internal/fluxer"
 	"github.com/nunocgoncalves/forge/internal/provisioner"
 )
 
@@ -369,6 +370,15 @@ func testConfigWithChart() *config.Cluster {
 	return c
 }
 
+func TestCertificateSubstrateRepository(t *testing.T) {
+	repository, err := certificateSubstrateRepository("oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform")
+	require.NoError(t, err)
+	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate", repository)
+
+	_, err = certificateSubstrateRepository("oci://example.invalid/custom-platform")
+	require.ErrorContains(t, err, "must end in /iterabase-platform")
+}
+
 func TestApply_Chart(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
@@ -377,11 +387,17 @@ func TestApply_Chart(t *testing.T) {
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
+	assert.True(t, res.CertificateSubstrateApplied)
 	assert.True(t, res.ChartApplied)
-	require.Len(t, d.applyCalls, 1)
-	assert.Equal(t, "0.1.0", d.applyCalls[0].version)
-	assert.Equal(t, "opo1", d.applyCalls[0].release)
-	assert.Equal(t, "iterabase-system", d.applyCalls[0].namespace)
+	require.Len(t, d.applyCalls, 2)
+	substrate, platform := d.applyCalls[0], d.applyCalls[1]
+	assert.Equal(t, "0.1.0", substrate.version)
+	assert.Equal(t, "opo1-cert-manager", substrate.release)
+	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/cert-manager-substrate", substrate.repository)
+	assert.Equal(t, []string{"cert-manager.prometheus.servicemonitor.enabled=false"}, substrate.values)
+	assert.Equal(t, "0.1.0", platform.version)
+	assert.Equal(t, "opo1", platform.release)
+	assert.Equal(t, "iterabase-system", platform.namespace)
 }
 
 func TestApply_SkipChart(t *testing.T) {
@@ -400,8 +416,9 @@ func TestDestroy_Chart(t *testing.T) {
 	p.pf.Installed = true
 	d := &fakeDeployer{}
 	require.NoError(t, Destroy(context.Background(), testConfigWithChart(), p, d, nil, nil))
-	require.Len(t, d.uninstallCalls, 1)
+	require.Len(t, d.uninstallCalls, 2)
 	assert.Equal(t, "opo1", d.uninstallCalls[0].release)
+	assert.Equal(t, "opo1-cert-manager", d.uninstallCalls[1].release)
 	assert.False(t, p.state.Installed) // k3s uninstalled too
 }
 
@@ -476,9 +493,9 @@ func TestApply_GPU(t *testing.T) {
 		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
-	// GPU operator applied before the platform chart (substrate before app).
-	require.Len(t, d.applyCalls, 2)
-	op, chart := d.applyCalls[0], d.applyCalls[1]
+	// GPU operator and certificate substrate are applied before the platform.
+	require.Len(t, d.applyCalls, 3)
+	op, chart := d.applyCalls[0], d.applyCalls[2]
 	assert.Equal(t, "opo1-gpu-operator", op.release)
 	assert.Equal(t, "nvidia/gpu-operator", op.repository)
 	assert.Equal(t, "v26.3.3", op.version)
@@ -531,7 +548,7 @@ func TestApply_GPU_EmptyDriverOmitsSet(t *testing.T) {
 		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
-	require.Len(t, d.applyCalls, 2)
+	require.Len(t, d.applyCalls, 3)
 	op := d.applyCalls[0]
 	for _, v := range op.values {
 		assert.NotContains(t, v, "driver.version")
@@ -561,7 +578,7 @@ func TestApply_GPU_PinnedDriverEmitsSet(t *testing.T) {
 		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
-	require.Len(t, d.applyCalls, 2)
+	require.Len(t, d.applyCalls, 3)
 	op := d.applyCalls[0]
 	assert.Contains(t, op.values, "driver.version=570.186")
 	// ordering / other values unchanged — driver.version appended after the base set.
@@ -602,7 +619,7 @@ func TestApply_GPU_DriverUpgradePolicy(t *testing.T) {
 		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
-	require.Len(t, d.applyCalls, 2)
+	require.Len(t, d.applyCalls, 3)
 	op := d.applyCalls[0]
 	assert.Contains(t, op.values,
 		"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true")
@@ -629,8 +646,8 @@ func TestApply_SkipGPU(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, d.repoCalls)          // no GPU operator repo
 	assert.Equal(t, 0, p.ensureDepsCalls) // no build deps
-	require.Len(t, d.applyCalls, 1)       // platform chart only
-	assert.Equal(t, "opo1", d.applyCalls[0].release)
+	require.Len(t, d.applyCalls, 2)       // certificate substrate + platform
+	assert.Equal(t, "opo1", d.applyCalls[1].release)
 	// Skipped phase does not claim the operator ran.
 	assert.False(t, res.GPUOperatorApplied)
 	assert.False(t, res.GPUReady)
@@ -657,7 +674,7 @@ func TestApply_SkipGPU_SurfacesConfiguredPin(t *testing.T) {
 		SkipGPU: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
-	require.Len(t, d.applyCalls, 1) // platform chart only — GPU phase skipped
+	require.Len(t, d.applyCalls, 2) // certificate substrate + platform; GPU skipped
 	assert.False(t, res.GPUOperatorApplied)
 	assert.Equal(t, "570.186", res.GPUDriverVersion)
 }
@@ -684,10 +701,11 @@ func TestDestroy_GPU(t *testing.T) {
 	p.pf.Installed = true
 	d := &fakeDeployer{}
 	require.NoError(t, Destroy(context.Background(), testConfigWithGPU(), p, d, nil, nil))
-	require.Len(t, d.uninstallCalls, 2)                               // chart + gpu operator
-	assert.Equal(t, "opo1", d.uninstallCalls[0].release)              // chart first
-	assert.Equal(t, "opo1-gpu-operator", d.uninstallCalls[1].release) // then operator
-	assert.False(t, p.state.Installed)                                // then k3s
+	require.Len(t, d.uninstallCalls, 3)
+	assert.Equal(t, "opo1", d.uninstallCalls[0].release)
+	assert.Equal(t, "opo1-cert-manager", d.uninstallCalls[1].release)
+	assert.Equal(t, "opo1-gpu-operator", d.uninstallCalls[2].release)
+	assert.False(t, p.state.Installed)
 }
 
 func TestApply_Overlay(t *testing.T) {
@@ -712,9 +730,11 @@ func TestApply_Overlay(t *testing.T) {
 	assert.Equal(t, "/var/lib/forge/overlay/opo1", o.cloneCalls[0].dest)
 	assert.False(t, o.cloneCalls[0].hasToken)
 
-	// chart applied with overlay value files (-f values.yaml -f values.client.yaml).
-	require.Len(t, d.applyCalls, 1)
-	assert.Equal(t, []string{"/var/lib/forge/overlay/opo1/values.yaml", "/var/lib/forge/overlay/opo1/values.client.yaml"}, d.applyCalls[0].valueFiles)
+	// Substrate and platform receive the same overlay value files.
+	require.Len(t, d.applyCalls, 2)
+	valueFiles := []string{"/var/lib/forge/overlay/opo1/values.yaml", "/var/lib/forge/overlay/opo1/values.client.yaml"}
+	assert.Equal(t, valueFiles, d.applyCalls[0].valueFiles)
+	assert.Equal(t, valueFiles, d.applyCalls[1].valueFiles)
 
 	// CRD instances applied via kustomize AFTER the chart (ordering: clone -> chart -> crds).
 	require.Len(t, d.applyKustomizeCalls, 1)
@@ -752,8 +772,9 @@ func TestApply_Overlay_SkippedWhenNoRepo(t *testing.T) {
 	assert.False(t, res.OverlayApplied)
 	assert.Empty(t, o.cloneCalls, "no clone when overlay.repo is empty")
 	assert.Empty(t, d.applyKustomizeCalls, "no kustomize apply when no overlay")
-	require.Len(t, d.applyCalls, 1)
-	assert.Empty(t, d.applyCalls[0].valueFiles, "chart applied with no value files when no overlay")
+	require.Len(t, d.applyCalls, 2)
+	assert.Empty(t, d.applyCalls[0].valueFiles)
+	assert.Empty(t, d.applyCalls[1].valueFiles, "platform applied with no value files when no overlay")
 }
 
 func TestApply_Overlay_SkipFlag(t *testing.T) {
@@ -929,11 +950,13 @@ func TestApply_Secrets_NoOverlay(t *testing.T) {
 
 // fakeFluxer is a controllable fluxer.Fluxer for lifecycle flux tests.
 type fakeFluxer struct {
-	ensureVersion  string
-	ensureErr      error
-	ensureCalls    int
-	uninstallCalls int
-	gitRepoStatus  string
+	ensureVersion    string
+	ensureErr        error
+	ensureCalls      int
+	uninstallCalls   int
+	artifact         fluxer.GitRepositoryArtifact
+	artifactErr      error
+	artifactNotReady bool
 }
 
 func (f *fakeFluxer) EnsureFlux(_ context.Context, version string) error {
@@ -945,8 +968,17 @@ func (f *fakeFluxer) UninstallFlux(_ context.Context) error {
 	f.uninstallCalls++
 	return nil
 }
-func (f *fakeFluxer) GitRepositoryStatus(_ context.Context, _ string) (string, error) {
-	return f.gitRepoStatus, nil
+func (f *fakeFluxer) GitRepositoryArtifact(_ context.Context, _ string) (fluxer.GitRepositoryArtifact, error) {
+	if f.artifactErr != nil {
+		return fluxer.GitRepositoryArtifact{}, f.artifactErr
+	}
+	if f.artifactNotReady {
+		return fluxer.GitRepositoryArtifact{}, nil
+	}
+	if f.artifact.Revision == "" {
+		return fluxer.GitRepositoryArtifact{Ready: true, Revision: "main@sha1:deadbeef", Digest: "sha256:0123456789abcdef"}, nil
+	}
+	return f.artifact, nil
 }
 
 // testConfigWithFlux extends the overlay config (chart + https overlay) with
@@ -962,7 +994,7 @@ func TestApply_Flux(t *testing.T) {
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
 	o := &fakeOverlayer{cloneCommit: "deadbeef"}
-	fx := &fakeFluxer{gitRepoStatus: "True"}
+	fx := &fakeFluxer{}
 	cfg := testConfigWithFlux()
 
 	res, err := Apply(context.Background(), cfg, p, d, o, fx, ApplyOpts{
@@ -971,16 +1003,16 @@ func TestApply_Flux(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.True(t, res.FluxInstalled)
-	assert.Equal(t, "True", res.GitRepositoryStatus)
+	assert.Equal(t, "ready=True revision=main@sha1:deadbeef digest=sha256:0123456789abcdef", res.GitRepositoryStatus)
 
 	// EnsureFlux called with the configured version.
 	require.Equal(t, 1, fx.ensureCalls)
 	assert.Equal(t, "v2.4.0", fx.ensureVersion)
 
-	// Four Flux resources applied via stdin: token Secret → GitRepository →
-	// Kustomization → narrowly scoped source-artifact ingress policy.
+	// Four Flux resources are applied in lifecycle order: source credentials →
+	// GitRepository → artifact policy before Helm, then Kustomization afterward.
 	require.Len(t, d.applyManifestCalls, 4)
-	sec, repo, kust, policy := d.applyManifestCalls[0], d.applyManifestCalls[1], d.applyManifestCalls[2], d.applyManifestCalls[3]
+	sec, repo, policy, kust := d.applyManifestCalls[0], d.applyManifestCalls[1], d.applyManifestCalls[2], d.applyManifestCalls[3]
 	assert.Contains(t, sec, `"Secret"`)
 	assert.Contains(t, sec, `"overlay-git-auth"`)
 	assert.Contains(t, sec, "ghp_secret", "token piped via stdin manifest (stringData)")
@@ -1004,19 +1036,9 @@ func TestApply_Flux(t *testing.T) {
 		}
 	}
 
-	// Flux phase runs LAST: the manifest applies come after the chart + CRD
-	// kustomize (substrate + one-time overlay before continuous).
-	kustomizeIdx := -1
-	firstManifestIdx := -1
-	for i, op := range d.order {
-		if op == "kustomize" && kustomizeIdx == -1 {
-			kustomizeIdx = i
-		}
-		if op == "manifest" && firstManifestIdx == -1 {
-			firstManifestIdx = i
-		}
-	}
-	assert.Greater(t, firstManifestIdx, kustomizeIdx, "flux manifests applied after the overlay CRD kustomize")
+	// Source manifests precede Helm so the runner can load a generation during
+	// --wait; continuous reconciliation starts only after the one-time CR apply.
+	require.Equal(t, []string{"apply", "manifest", "manifest", "manifest", "apply", "kustomize", "manifest"}, d.order)
 }
 
 func TestApply_Flux_PublicRepoNoToken(t *testing.T) {
@@ -1034,10 +1056,10 @@ func TestApply_Flux_PublicRepoNoToken(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, res.FluxInstalled)
 
-	// No token Secret (GitRepository + Kustomization + artifact ingress policy);
-	// GitRepository has no secretRef (Flux clones anonymously).
+	// No token Secret (GitRepository + artifact ingress policy before Helm,
+	// Kustomization after); GitRepository has no secretRef.
 	require.Len(t, d.applyManifestCalls, 3)
-	repo, kust, policy := d.applyManifestCalls[0], d.applyManifestCalls[1], d.applyManifestCalls[2]
+	repo, policy, kust := d.applyManifestCalls[0], d.applyManifestCalls[1], d.applyManifestCalls[2]
 	assert.Contains(t, repo, `"GitRepository"`)
 	assert.NotContains(t, repo, `"secretRef"`, "public repo => no secretRef")
 	assert.NotContains(t, repo, "ghp_secret")
@@ -1107,6 +1129,39 @@ func TestApply_Flux_EnsureFluxFails(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "flux install")
 	assert.Empty(t, d.applyManifestCalls, "sync resources not applied when EnsureFlux fails")
+}
+
+func TestApply_Flux_WaitsForExactArtifactBeforeChart(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{artifact: fluxer.GitRepositoryArtifact{
+		Ready: true, Revision: "main@sha1:stale", Digest: "sha256:0123456789abcdef",
+	}}
+
+	_, err := Apply(context.Background(), testConfigWithFlux(), p, d, o, fx, ApplyOpts{
+		ReadyTimeout: 30 * time.Millisecond, ReadyInterval: 5 * time.Millisecond,
+	})
+	require.ErrorContains(t, err, `did not publish Ready commit "deadbeef"`)
+	require.Len(t, d.applyCalls, 1)
+	assert.Equal(t, "opo1-cert-manager", d.applyCalls[0].release)
+	assert.NotEmpty(t, d.applyManifestCalls, "the source is established before polling")
+}
+
+func TestApply_Flux_ArtifactReadFailureStopsBeforeChart(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{artifactErr: errors.New("api unavailable")}
+
+	_, err := Apply(context.Background(), testConfigWithFlux(), p, d, o, fx, ApplyOpts{
+		ReadyTimeout: time.Second, ReadyInterval: 5 * time.Millisecond,
+	})
+	require.ErrorContains(t, err, "read Flux GitRepository artifact")
+	require.Len(t, d.applyCalls, 1)
+	assert.Equal(t, "opo1-cert-manager", d.applyCalls[0].release)
 }
 
 func TestDestroy_Flux(t *testing.T) {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
+	"time"
 
 	"github.com/nunocgoncalves/forge/internal/config"
 	"github.com/nunocgoncalves/forge/internal/deployer"
@@ -29,15 +31,12 @@ const (
 // GitRepository distinguishes the two.
 var semverTagRe = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[0-9A-Za-z-.]+)?$`)
 
-// applyFluxPhase runs the Flux GitOps phase: install Flux components
-// (EnsureFlux, which also installs the source/kustomize CRDs) → token Secret →
-// GitRepository → Kustomization. Flux then continuously reconciles the overlay's
-// CRD instances (crds/client, prune=true) + materializes the fork in-cluster via
-// source-controller (the pi/ tree source for the AgentSandbox operator,
-// HOR-351). Runs LAST (substrate + one-time overlay before continuous). No-op
-// when Flux is disabled or skipped; never gates apply on Flux reconcile health
-// (Flux reconciles async — the status read is informational).
-func applyFluxPhase(ctx context.Context, cfg *config.Cluster, f fluxer.Fluxer, d deployer.Deployer, opts ApplyOpts, res *Result) error {
+// applyFluxSourcePhase establishes the exact source-controller artifact before
+// Helm starts the tool runner. This breaks the bootstrap cycle in which Helm
+// waits for a runner generation but Forge previously created the GitRepository
+// only after the chart. Forge gates on metadata only and never downloads or
+// parses the artifact.
+func applyFluxSourcePhase(ctx context.Context, cfg *config.Cluster, f fluxer.Fluxer, d deployer.Deployer, opts ApplyOpts, res *Result, expectedCommit string) error {
 	if !cfg.Spec.Flux.Enabled || opts.SkipFlux {
 		return nil
 	}
@@ -50,9 +49,8 @@ func applyFluxPhase(ctx context.Context, cfg *config.Cluster, f fluxer.Fluxer, d
 	}
 
 	// Token Secret (only when a token was resolved — public repos omit it and
-	// Flux clones anonymously). Applied via stdin (kubectl apply -f -) so the
-	// token never appears in a command string or ps; mirrors the secret-sync
-	// phase invariant.
+	// Flux clones anonymously). Applied through stdin so the token never appears
+	// in a command string or process list.
 	hasToken := len(opts.OverlayToken) > 0
 	if hasToken {
 		sec := fluxTokenSecretManifest(fluxTokenSecretName, fluxNamespace, fluxGitUsername, opts.OverlayToken)
@@ -62,7 +60,6 @@ func applyFluxPhase(ctx context.Context, cfg *config.Cluster, f fluxer.Fluxer, d
 		}
 	}
 
-	// GitRepository: source-controller fetches + materializes the client fork.
 	secretRef := ""
 	if hasToken {
 		secretRef = fluxTokenSecretName
@@ -73,19 +70,8 @@ func applyFluxPhase(ctx context.Context, cfg *config.Cluster, f fluxer.Fluxer, d
 		return fmt.Errorf("flux gitrepository: %w", err)
 	}
 
-	// Kustomization: reconcile crds/client (prune=true — Flux is the mirror
-	// authority, including deletions; forge's one-time apply -k is the immediate
-	// convergence layer but does not prune).
-	kust := kustomizationManifest(fluxKustomizeName, fluxNamespace, fluxSourceName, fluxCRDPath)
-	if err := d.ApplyManifest(ctx, kust); err != nil {
-		auditFail(cfg, "apply-flux", err)
-		return fmt.Errorf("flux kustomization: %w", err)
-	}
-
-	// Flux installs a default-deny ingress policy around source-controller's
-	// artifact server. Permit only the chart's credential-split tool-runner pod
-	// to retrieve exact GitRepository artifacts; Forge still never downloads or
-	// parses tool code (HOR-397). No chart means no runner consumer to authorize.
+	// source-controller's artifact server is default-deny. Authorize only the
+	// chart's credential-split materializer before its pod starts.
 	if cfg.Spec.Chart.Namespace != "" {
 		policy := sourceArtifactNetworkPolicyManifest(fluxNamespace, cfg.Spec.Chart.Namespace)
 		if err := d.ApplyManifest(ctx, policy); err != nil {
@@ -94,14 +80,55 @@ func applyFluxPhase(ctx context.Context, cfg *config.Cluster, f fluxer.Fluxer, d
 		}
 	}
 
+	artifact, err := waitForFluxArtifact(ctx, f, expectedCommit, opts.ReadyTimeout, opts.ReadyInterval)
+	if err != nil {
+		auditFail(cfg, "apply-flux", err)
+		return err
+	}
 	res.FluxInstalled = true
-	// Best-effort status read (informational; never gates apply). Flux reconciles
-	// async — the GitRepository may not be Ready yet on first apply, and git
-	// egress from the cluster is not forge's responsibility to gate on.
-	if status, err := f.GitRepositoryStatus(ctx, fluxSourceName); err == nil {
-		res.GitRepositoryStatus = status
+	res.GitRepositoryStatus = fmt.Sprintf("ready=True revision=%s digest=%s", artifact.Revision, artifact.Digest)
+	return nil
+}
+
+// applyFluxReconciliationPhase starts continuous reconciliation only after the
+// chart has established the CRDs targeted by crds/client. The GitRepository was
+// already made Ready by applyFluxSourcePhase.
+func applyFluxReconciliationPhase(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts) error {
+	if !cfg.Spec.Flux.Enabled || opts.SkipFlux {
+		return nil
+	}
+	kust := kustomizationManifest(fluxKustomizeName, fluxNamespace, fluxSourceName, fluxCRDPath)
+	if err := d.ApplyManifest(ctx, kust); err != nil {
+		auditFail(cfg, "apply-flux", err)
+		return fmt.Errorf("flux kustomization: %w", err)
 	}
 	return nil
+}
+
+func waitForFluxArtifact(ctx context.Context, f fluxer.Fluxer, expectedCommit string, timeout, interval time.Duration) (fluxer.GitRepositoryArtifact, error) {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		artifact, err := f.GitRepositoryArtifact(ctx, fluxSourceName)
+		if err != nil {
+			return fluxer.GitRepositoryArtifact{}, fmt.Errorf("read Flux GitRepository artifact: %w", err)
+		}
+		if artifact.Ready && artifact.Digest != "" && strings.HasPrefix(artifact.Digest, "sha256:") &&
+			(expectedCommit == "" || strings.HasSuffix(artifact.Revision, ":"+expectedCommit)) {
+			return artifact, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return fluxer.GitRepositoryArtifact{}, ctx.Err()
+		case <-deadline.C:
+			return fluxer.GitRepositoryArtifact{}, fmt.Errorf("flux GitRepository %q did not publish Ready commit %q with a sha256 digest within %s", fluxSourceName, expectedCommit, timeout)
+		case <-ticker.C:
+		}
+	}
 }
 
 type networkPolicy struct {

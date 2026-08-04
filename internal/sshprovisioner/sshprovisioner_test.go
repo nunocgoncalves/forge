@@ -1223,7 +1223,7 @@ func TestFluxer_UninstallFlux_FluxAbsent(t *testing.T) {
 	require.NoError(t, p.UninstallFlux(context.Background()))
 }
 
-func TestFluxer_GitRepositoryStatus(t *testing.T) {
+func TestFluxer_GitRepositoryArtifact(t *testing.T) {
 	var got string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
@@ -1237,15 +1237,17 @@ func TestFluxer_GitRepositoryStatus(t *testing.T) {
 	defer cleanup()
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
-	status, err := p.GitRepositoryStatus(context.Background(), "overlay")
+	artifact, err := p.GitRepositoryArtifact(context.Background(), "overlay")
 	require.NoError(t, err)
-	assert.Equal(t, "ready=True revision=main@sha1:abc digest=sha256:0123456789abcdef", status)
+	assert.True(t, artifact.Ready)
+	assert.Equal(t, "main@sha1:abc", artifact.Revision)
+	assert.Equal(t, "sha256:0123456789abcdef", artifact.Digest)
 	assert.Contains(t, got, "gitrepository")
 	assert.Contains(t, got, "flux-system")
 	assert.Contains(t, got, "overlay")
 }
 
-func TestFluxer_GitRepositoryStatus_NotPresent(t *testing.T) {
+func TestFluxer_GitRepositoryArtifact_NotPresent(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		// kubectl errors (CR not present yet) => tolerated as empty.
 		return "", 1
@@ -1253,7 +1255,9 @@ func TestFluxer_GitRepositoryStatus_NotPresent(t *testing.T) {
 	defer cleanup()
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
-	status, err := p.GitRepositoryStatus(context.Background(), "overlay")
+	artifact, err := p.GitRepositoryArtifact(context.Background(), "overlay")
 	require.NoError(t, err, "a missing/not-ready GitRepository is tolerated, not an error")
-	assert.Empty(t, status)
+	assert.False(t, artifact.Ready)
+	assert.Empty(t, artifact.Revision)
+	assert.Empty(t, artifact.Digest)
 }
