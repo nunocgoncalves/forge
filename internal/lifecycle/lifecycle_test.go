@@ -362,7 +362,7 @@ func (f *fakeOverlayer) ReadFile(_ context.Context, dest, relPath string) (strin
 func testConfigWithChart() *config.Cluster {
 	c := testConfig()
 	c.Spec.Chart = config.Chart{
-		Version:    "0.1.0",
+		Version:    "0.3.0",
 		Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
 		Release:    "opo1",
 		Namespace:  "iterabase-system",
@@ -371,6 +371,15 @@ func testConfigWithChart() *config.Cluster {
 }
 
 func TestCertificateSubstrateRepository(t *testing.T) {
+	required, err := certificateSubstrateRequired("0.2.2")
+	require.NoError(t, err)
+	assert.False(t, required)
+	required, err = certificateSubstrateRequired("v0.3.0-rc.1")
+	require.NoError(t, err)
+	assert.True(t, required)
+	_, err = certificateSubstrateRequired("latest")
+	require.ErrorContains(t, err, "invalid chart version")
+
 	repository, err := certificateSubstrateRepository("oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform")
 	require.NoError(t, err)
 	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate", repository)
@@ -391,13 +400,27 @@ func TestApply_Chart(t *testing.T) {
 	assert.True(t, res.ChartApplied)
 	require.Len(t, d.applyCalls, 2)
 	substrate, platform := d.applyCalls[0], d.applyCalls[1]
-	assert.Equal(t, "0.1.0", substrate.version)
+	assert.Equal(t, "0.3.0", substrate.version)
 	assert.Equal(t, "opo1-cert-manager", substrate.release)
 	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/cert-manager-substrate", substrate.repository)
 	assert.Equal(t, []string{"cert-manager.prometheus.servicemonitor.enabled=false"}, substrate.values)
-	assert.Equal(t, "0.1.0", platform.version)
+	assert.Equal(t, "0.3.0", platform.version)
 	assert.Equal(t, "opo1", platform.release)
 	assert.Equal(t, "iterabase-system", platform.namespace)
+}
+
+func TestApply_Chart_PreSubstrateVersionRemainsCompatible(t *testing.T) {
+	useTempHome(t)
+	cfg := testConfigWithChart()
+	cfg.Spec.Chart.Version = "0.2.2"
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), cfg,
+		&fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true},
+		d, nil, nil, ApplyOpts{ReadyTimeout: time.Second, ReadyInterval: 10 * time.Millisecond})
+	require.NoError(t, err)
+	assert.False(t, res.CertificateSubstrateApplied)
+	require.Len(t, d.applyCalls, 1)
+	assert.Equal(t, "opo1", d.applyCalls[0].release)
 }
 
 func TestApply_SkipChart(t *testing.T) {
@@ -516,7 +539,7 @@ func TestApply_GPU(t *testing.T) {
 		"driver.upgradePolicy.drain.enable=false",
 	}, op.values)
 	assert.Equal(t, "opo1", chart.release)
-	assert.Equal(t, "0.1.0", chart.version)
+	assert.Equal(t, "0.3.0", chart.version)
 	assert.Equal(t, 1, p.ensureDepsCalls) // build deps ensured once
 	require.Len(t, d.repoCalls, 1)
 	assert.Equal(t, "nvidia", d.repoCalls[0].name)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -248,7 +249,42 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 	return res, nil
 }
 
-const certificateSubstrateChart = "cert-manager-substrate"
+const (
+	certificateSubstrateChart        = "cert-manager-substrate"
+	certificateSubstrateFirstVersion = "0.3.0"
+)
+
+func numericChartVersion(version string) (major, minor, patch int, err error) {
+	core := strings.SplitN(strings.TrimPrefix(version, "v"), "-", 2)[0]
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return 0, 0, 0, fmt.Errorf("invalid chart version %q", version)
+	}
+	values := []*int{&major, &minor, &patch}
+	for i, part := range parts {
+		value, parseErr := strconv.Atoi(part)
+		if parseErr != nil || value < 0 {
+			return 0, 0, 0, fmt.Errorf("invalid chart version %q", version)
+		}
+		*values[i] = value
+	}
+	return major, minor, patch, nil
+}
+
+func certificateSubstrateRequired(version string) (bool, error) {
+	major, minor, patch, err := numericChartVersion(version)
+	if err != nil {
+		return false, err
+	}
+	firstMajor, firstMinor, firstPatch, _ := numericChartVersion(certificateSubstrateFirstVersion)
+	if major != firstMajor {
+		return major > firstMajor, nil
+	}
+	if minor != firstMinor {
+		return minor > firstMinor, nil
+	}
+	return patch >= firstPatch, nil
+}
 
 func certificateSubstrateRepository(platformRepository string) (string, error) {
 	i := strings.LastIndex(platformRepository, "/")
@@ -271,6 +307,13 @@ func applyCertificateSubstrate(ctx context.Context, cfg *config.Cluster, d deplo
 		return nil
 	}
 	ch := cfg.Spec.Chart
+	required, err := certificateSubstrateRequired(ch.Version)
+	if err != nil {
+		return err
+	}
+	if !required {
+		return nil // pre-0.3 platform artifacts still bundle cert-manager
+	}
 	repository, err := certificateSubstrateRepository(ch.Repository)
 	if err != nil {
 		return err
@@ -566,7 +609,9 @@ func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 	if d != nil && cfg.Spec.Chart.Version != "" {
 		ch := cfg.Spec.Chart
 		_ = d.UninstallChart(ctx, ch.Release, ch.Namespace)
-		_ = d.UninstallChart(ctx, certificateSubstrateRelease(ch.Release), ch.Namespace)
+		if required, err := certificateSubstrateRequired(ch.Version); err == nil && required {
+			_ = d.UninstallChart(ctx, certificateSubstrateRelease(ch.Release), ch.Namespace)
+		}
 	}
 	if d != nil && cfg.Spec.GPU.Enabled {
 		g := cfg.Spec.GPU.Operator
