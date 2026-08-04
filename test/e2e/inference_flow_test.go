@@ -82,8 +82,9 @@ func runInferenceFlowContract(t *testing.T) {
 	//    kind; the test port-forwards the api + gateway directly). redis stays
 	//    enabled (the gateway uses it for rate-limit counters).
 	values := map[string]string{
-		"ingress-nginx.enabled": "false",
-		"minio.enabled":         "false",
+		"ingress-nginx.enabled":          "false",
+		"minio.enabled":                  "false",
+		"control-plane.artifact.enabled": "false",
 	}
 	c.HelmInstall(t, release, chartRef, chartVersion, namespace, localChart, values)
 
