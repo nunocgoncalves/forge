@@ -31,9 +31,10 @@ type ApplyOpts struct {
 // instance is bound to a single host (the same host the Provisioner bootstrapped
 // k3s on); helm + k3s kubectl run there over SSH using the k3s kubeconfig.
 type Deployer interface {
-	// Apply idempotently installs or upgrades a Helm release (helm upgrade
-	// --install), applying -f value files (ValueFiles, in order) then --set
-	// values (Values). It ensures helm is present first.
+	// Apply idempotently reconciles CRDs bundled in the pinned chart artifact,
+	// waits for them to become Established, then installs or upgrades the Helm
+	// release (helm upgrade --install), applying -f value files (ValueFiles, in
+	// order) then --set values (Values). It ensures helm is present first.
 	Apply(ctx context.Context, opts ApplyOpts) error
 	// EnsureRepo adds (or force-updates) a Helm repository on the host. Needed
 	// for repo-based charts (e.g. the NVIDIA GPU Operator); a no-op concern for

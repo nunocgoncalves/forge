@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"gopkg.in/yaml.v3"
 
 	"github.com/nunocgoncalves/forge/internal/config"
 	"github.com/nunocgoncalves/forge/internal/deployer"
@@ -413,11 +415,94 @@ func (p *SSHProvisioner) ensureHelm(ctx context.Context) error {
 	return nil
 }
 
+type chartCRDHeader struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Metadata   struct {
+		Name string `yaml:"name"`
+	} `yaml:"metadata"`
+}
+
+// extractChartCRDs removes Helm's OCI pull-status preamble and any comment-only
+// YAML documents from `helm show crds`. Helm 4 writes "Pulled" and "Digest" to
+// stdout for OCI charts, which kubectl otherwise tries to decode as a resource.
+// It also keeps the first occurrence of a CRD name, matching Helm's install
+// behavior when multiple dependencies bundle the same CRD at different schema
+// versions (for example, kube-prometheus-stack and Loki ServiceMonitors).
+func extractChartCRDs(raw string) (string, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(raw))
+	seen := make(map[string]struct{})
+	var manifests []string
+	for {
+		var document yaml.Node
+		if err := decoder.Decode(&document); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return "", fmt.Errorf("decode chart CRDs: %w", err)
+		}
+		var header chartCRDHeader
+		if err := document.Decode(&header); err != nil {
+			return "", fmt.Errorf("decode chart CRD header: %w", err)
+		}
+		if header.APIVersion != "apiextensions.k8s.io/v1" || header.Kind != "CustomResourceDefinition" {
+			continue
+		}
+		if header.Metadata.Name == "" {
+			return "", errors.New("chart CRD is missing metadata.name")
+		}
+		if _, duplicate := seen[header.Metadata.Name]; duplicate {
+			continue
+		}
+		seen[header.Metadata.Name] = struct{}{}
+		manifest, err := yaml.Marshal(&document)
+		if err != nil {
+			return "", fmt.Errorf("encode chart CRD: %w", err)
+		}
+		manifests = append(manifests, strings.TrimSpace(string(manifest)))
+	}
+	if len(manifests) == 0 {
+		return "", nil
+	}
+	return strings.Join(manifests, "\n---\n") + "\n", nil
+}
+
+// applyChartCRDs reconciles the CRDs bundled in the exact pinned chart artifact
+// before Helm renders/maps the release's custom resources. Helm installs CRDs
+// only on a release's initial install; it does not install CRDs introduced by a
+// dependency that is enabled later during upgrade. Server-side apply avoids the
+// oversized last-applied annotation common with CRDs and makes repeated applies
+// idempotent. CRDs intentionally remain on uninstall to protect custom-resource
+// data, matching Helm's CRD lifecycle semantics.
+func (p *SSHProvisioner) applyChartCRDs(ctx context.Context, opts deployer.ApplyOpts) error {
+	raw, err := p.run(ctx, helmCmd("show", "crds", opts.Repository, "--version", opts.Version))
+	if err != nil {
+		return fmt.Errorf("discover chart CRDs: %w", err)
+	}
+	crds, err := extractChartCRDs(raw)
+	if err != nil {
+		return err
+	}
+	if crds == "" {
+		return nil
+	}
+	if _, err := p.runStdin(ctx, kubectlCmd("apply", "--server-side", "--force-conflicts", "-f", "-"), crds); err != nil {
+		return fmt.Errorf("apply chart CRDs: %w", err)
+	}
+	if _, err := p.runStdin(ctx, kubectlCmd("wait", "--for=condition=Established", "--timeout=2m", "-f", "-"), crds); err != nil {
+		return fmt.Errorf("wait for chart CRDs: %w", err)
+	}
+	return nil
+}
+
 // Apply implements deployer.Deployer: idempotent helm upgrade --install of a
 // Helm release, applying -f value files (ValueFiles, in order) then --set values
-// (Values), ensuring helm first.
+// (Values), ensuring helm and reconciling the pinned chart's CRDs first.
 func (p *SSHProvisioner) Apply(ctx context.Context, opts deployer.ApplyOpts) error {
 	if err := p.ensureHelm(ctx); err != nil {
+		return err
+	}
+	if err := p.applyChartCRDs(ctx, opts); err != nil {
 		return err
 	}
 	args := []string{"upgrade", "--install", opts.Release, opts.Repository,
