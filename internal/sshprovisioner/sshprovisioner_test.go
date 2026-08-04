@@ -1229,7 +1229,7 @@ func TestFluxer_GitRepositoryStatus(t *testing.T) {
 		switch {
 		case strings.Contains(cmd, "gitrepository"):
 			got = cmd
-			return "True\n", 0
+			return "True\tmain@sha1:abc\tsha256:0123456789abcdef\n", 0
 		default:
 			return "", 1
 		}
@@ -1239,7 +1239,7 @@ func TestFluxer_GitRepositoryStatus(t *testing.T) {
 	defer p.Close()
 	status, err := p.GitRepositoryStatus(context.Background(), "overlay")
 	require.NoError(t, err)
-	assert.Equal(t, "True", status)
+	assert.Equal(t, "ready=True revision=main@sha1:abc digest=sha256:0123456789abcdef", status)
 	assert.Contains(t, got, "gitrepository")
 	assert.Contains(t, got, "flux-system")
 	assert.Contains(t, got, "overlay")

@@ -82,6 +82,18 @@ func applyFluxPhase(ctx context.Context, cfg *config.Cluster, f fluxer.Fluxer, d
 		return fmt.Errorf("flux kustomization: %w", err)
 	}
 
+	// Flux installs a default-deny ingress policy around source-controller's
+	// artifact server. Permit only the chart's credential-split tool-runner pod
+	// to retrieve exact GitRepository artifacts; Forge still never downloads or
+	// parses tool code (HOR-397). No chart means no runner consumer to authorize.
+	if cfg.Spec.Chart.Namespace != "" {
+		policy := sourceArtifactNetworkPolicyManifest(fluxNamespace, cfg.Spec.Chart.Namespace)
+		if err := d.ApplyManifest(ctx, policy); err != nil {
+			auditFail(cfg, "apply-flux", err)
+			return fmt.Errorf("flux artifact network policy: %w", err)
+		}
+	}
+
 	res.FluxInstalled = true
 	// Best-effort status read (informational; never gates apply). Flux reconciles
 	// async — the GitRepository may not be Ready yet on first apply, and git
@@ -90,6 +102,57 @@ func applyFluxPhase(ctx context.Context, cfg *config.Cluster, f fluxer.Fluxer, d
 		res.GitRepositoryStatus = status
 	}
 	return nil
+}
+
+type networkPolicy struct {
+	APIVersion string            `json:"apiVersion"`
+	Kind       string            `json:"kind"`
+	Metadata   fluxMeta          `json:"metadata"`
+	Spec       networkPolicySpec `json:"spec"`
+}
+
+type networkPolicySpec struct {
+	PodSelector map[string]map[string]string `json:"podSelector"`
+	PolicyTypes []string                     `json:"policyTypes"`
+	Ingress     []networkPolicyIngress       `json:"ingress"`
+}
+
+type networkPolicyIngress struct {
+	From  []networkPolicyPeer `json:"from"`
+	Ports []networkPolicyPort `json:"ports"`
+}
+
+type networkPolicyPeer struct {
+	NamespaceSelector map[string]map[string]string `json:"namespaceSelector"`
+	PodSelector       map[string]map[string]string `json:"podSelector"`
+}
+
+type networkPolicyPort struct {
+	Protocol string `json:"protocol"`
+	Port     int    `json:"port"`
+}
+
+func sourceArtifactNetworkPolicyManifest(namespace, consumerNamespace string) string {
+	labels := func(values map[string]string) map[string]map[string]string {
+		return map[string]map[string]string{"matchLabels": values}
+	}
+	policy := networkPolicy{
+		APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy",
+		Metadata: fluxMeta{Name: "allow-tool-materializer", Namespace: namespace},
+		Spec: networkPolicySpec{
+			PodSelector: labels(map[string]string{"app.kubernetes.io/component": "source-controller"}),
+			PolicyTypes: []string{"Ingress"},
+			Ingress: []networkPolicyIngress{{
+				From: []networkPolicyPeer{{
+					NamespaceSelector: labels(map[string]string{"kubernetes.io/metadata.name": consumerNamespace}),
+					PodSelector:       labels(map[string]string{"app.kubernetes.io/component": "tool-runner"}),
+				}},
+				Ports: []networkPolicyPort{{Protocol: "TCP", Port: 9090}},
+			}},
+		},
+	}
+	b, _ := json.Marshal(policy)
+	return string(b)
 }
 
 // fluxMeta is the shared metadata block for the Flux sync resources.

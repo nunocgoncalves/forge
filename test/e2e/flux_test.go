@@ -58,18 +58,21 @@ func runFluxStage(t *testing.T, state *digitalOceanCPUState) {
 	// GitRepository becomes Ready + source-controller materializes the fork
 	// (.status.artifact.revision non-empty) — the HOR-351 in-cluster source
 	// contract. Poll: Flux reconciles async after the GitRepository is applied.
-	gitReady, gitArtifact := pollFluxReady(t, sc, "gitrepository", "overlay", 4*time.Minute)
+	gitReady, gitArtifact, gitDigest := pollFluxReady(t, sc, "gitrepository", "overlay", 4*time.Minute)
 	if !gitReady {
 		t.Fatalf("GitRepository overlay never reached Ready=True")
 	}
-	t.Logf("gitrepository artifact revision: %s", gitArtifact)
-	if gitArtifact == "" {
-		t.Fatalf("GitRepository overlay has no materialized artifact (.status.artifact.revision empty) — source-controller did not fetch the fork")
+	t.Logf("gitrepository artifact revision: %s digest: %s", gitArtifact, gitDigest)
+	if gitArtifact == "" || gitDigest == "" {
+		t.Fatalf("GitRepository overlay has no exact materialized revision/digest — source-controller did not fetch the fork")
+	}
+	if !strings.HasPrefix(gitDigest, "sha256:") {
+		t.Fatalf("GitRepository overlay artifact digest is not canonical sha256: %q", gitDigest)
 	}
 
 	// Kustomization becomes Ready (reconciled crds/client — empty scaffold, 0
 	// objects, but Healthy wiring end-to-end).
-	kustReady, _ := pollFluxReady(t, sc, "kustomization", "overlay-crds", 2*time.Minute)
+	kustReady, _, _ := pollFluxReady(t, sc, "kustomization", "overlay-crds", 2*time.Minute)
 	if !kustReady {
 		t.Fatalf("Kustomization overlay-crds never reached Ready=True")
 	}
@@ -77,9 +80,9 @@ func runFluxStage(t *testing.T, state *digitalOceanCPUState) {
 }
 
 // pollFluxReady polls a Flux CR's Ready condition until True or the timeout
-// elapses. For a GitRepository it also reads .status.artifact.revision (the
-// source-controller materialization proof) and returns it.
-func pollFluxReady(t *testing.T, client *ssh.Client, kind, name string, timeout time.Duration) (ready bool, artifact string) {
+// elapses. For a GitRepository it also reads the exact revision and digest
+// that the runner materializer verifies (HOR-397).
+func pollFluxReady(t *testing.T, client *ssh.Client, kind, name string, timeout time.Duration) (ready bool, artifact, digest string) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	condPath := `'{.status.conditions[?(@.type=="Ready")].status}'`
@@ -90,12 +93,14 @@ func pollFluxReady(t *testing.T, client *ssh.Client, kind, name string, timeout 
 			if kind == "gitrepository" {
 				art, _ := sshOutput(client, fmt.Sprintf("sudo k3s kubectl get %s -n flux-system %s -o jsonpath='{.status.artifact.revision}'", kind, name))
 				artifact = strings.TrimSpace(art)
+				dig, _ := sshOutput(client, fmt.Sprintf("sudo k3s kubectl get %s -n flux-system %s -o jsonpath='{.status.artifact.digest}'", kind, name))
+				digest = strings.TrimSpace(dig)
 			}
-			return ready, artifact
+			return ready, artifact, digest
 		}
 		if time.Now().After(deadline) {
 			t.Logf("timeout waiting for %s/%s Ready (last output: %q)", kind, name, strings.TrimSpace(out))
-			return false, ""
+			return false, "", ""
 		}
 		time.Sleep(10 * time.Second)
 	}

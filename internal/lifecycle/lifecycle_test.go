@@ -977,10 +977,10 @@ func TestApply_Flux(t *testing.T) {
 	require.Equal(t, 1, fx.ensureCalls)
 	assert.Equal(t, "v2.4.0", fx.ensureVersion)
 
-	// Three sync resources applied via stdin: token Secret → GitRepository →
-	// Kustomization (in that order, after EnsureFlux which installs the CRDs).
-	require.Len(t, d.applyManifestCalls, 3)
-	sec, repo, kust := d.applyManifestCalls[0], d.applyManifestCalls[1], d.applyManifestCalls[2]
+	// Four Flux resources applied via stdin: token Secret → GitRepository →
+	// Kustomization → narrowly scoped source-artifact ingress policy.
+	require.Len(t, d.applyManifestCalls, 4)
+	sec, repo, kust, policy := d.applyManifestCalls[0], d.applyManifestCalls[1], d.applyManifestCalls[2], d.applyManifestCalls[3]
 	assert.Contains(t, sec, `"Secret"`)
 	assert.Contains(t, sec, `"overlay-git-auth"`)
 	assert.Contains(t, sec, "ghp_secret", "token piped via stdin manifest (stringData)")
@@ -992,6 +992,10 @@ func TestApply_Flux(t *testing.T) {
 	assert.Contains(t, kust, `"overlay-crds"`)
 	assert.Contains(t, kust, `"./crds/client"`)
 	assert.Contains(t, kust, `"prune":true`)
+	assert.Contains(t, policy, `"NetworkPolicy"`)
+	assert.Contains(t, policy, `"source-controller"`)
+	assert.Contains(t, policy, `"tool-runner"`)
+	assert.Contains(t, policy, `"iterabase-system"`)
 
 	// The token never reaches helm values (it stays in the stdin Secret).
 	for _, c := range d.applyCalls {
@@ -1030,14 +1034,15 @@ func TestApply_Flux_PublicRepoNoToken(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, res.FluxInstalled)
 
-	// No token Secret (only GitRepository + Kustomization); GitRepository has no
-	// secretRef (Flux clones anonymously).
-	require.Len(t, d.applyManifestCalls, 2)
-	repo, kust := d.applyManifestCalls[0], d.applyManifestCalls[1]
+	// No token Secret (GitRepository + Kustomization + artifact ingress policy);
+	// GitRepository has no secretRef (Flux clones anonymously).
+	require.Len(t, d.applyManifestCalls, 3)
+	repo, kust, policy := d.applyManifestCalls[0], d.applyManifestCalls[1], d.applyManifestCalls[2]
 	assert.Contains(t, repo, `"GitRepository"`)
 	assert.NotContains(t, repo, `"secretRef"`, "public repo => no secretRef")
 	assert.NotContains(t, repo, "ghp_secret")
 	assert.Contains(t, kust, `"Kustomization"`)
+	assert.Contains(t, policy, `"NetworkPolicy"`)
 }
 
 func TestApply_Flux_SkipFlag(t *testing.T) {
