@@ -282,7 +282,8 @@ type fakeDeployer struct {
 	applyManifestCalls   []string // captured manifests (JSON) piped via stdin
 	ownershipTransfers   []ownershipTransferCall
 	order                []string // ordered op log: "manifest" | "apply" | "transfer" | "kustomize" (phase ordering)
-	statusState          deployer.ChartState
+	statusStates         map[string]deployer.ChartState
+	crdsOwnedByTarget    bool
 	applyErr             error
 	applyManifestErr     error
 	ownershipTransferErr error
@@ -295,7 +296,14 @@ func (f *fakeDeployer) Apply(_ context.Context, opts deployer.ApplyOpts) error {
 		values: opts.Values, valueFiles: opts.ValueFiles,
 	})
 	f.order = append(f.order, "apply")
-	return f.applyErr
+	if f.applyErr != nil {
+		return f.applyErr
+	}
+	if f.statusStates == nil {
+		f.statusStates = make(map[string]deployer.ChartState)
+	}
+	f.statusStates[opts.Release] = deployer.ChartState{Installed: true, Status: "deployed", Version: opts.Version}
+	return nil
 }
 
 func (f *fakeDeployer) ApplyKustomize(_ context.Context, dir string) error {
@@ -317,14 +325,21 @@ func (f *fakeDeployer) EnsureRepo(_ context.Context, name, url string) error {
 	f.repoCalls = append(f.repoCalls, repoCall{name, url})
 	return nil
 }
-func (f *fakeDeployer) Status(_ context.Context, _, _ string) (*deployer.ChartState, error) {
-	s := f.statusState
+func (f *fakeDeployer) Status(_ context.Context, release, _ string) (*deployer.ChartState, error) {
+	s := f.statusStates[release]
 	return &s, nil
+}
+func (f *fakeDeployer) CRDOwnedBy(_ context.Context, _, _, _ string) (bool, error) {
+	return f.crdsOwnedByTarget, nil
 }
 func (f *fakeDeployer) TransferCRDOwnership(_ context.Context, selector, release, namespace string) error {
 	f.ownershipTransfers = append(f.ownershipTransfers, ownershipTransferCall{selector, release, namespace})
 	f.order = append(f.order, "transfer")
-	return f.ownershipTransferErr
+	if f.ownershipTransferErr != nil {
+		return f.ownershipTransferErr
+	}
+	f.crdsOwnedByTarget = true
+	return nil
 }
 func (f *fakeDeployer) UninstallChart(_ context.Context, release, ns string) error {
 	f.uninstallCalls = append(f.uninstallCalls, uninstallCall{release, ns})
@@ -426,7 +441,9 @@ func TestApply_Chart(t *testing.T) {
 func TestApply_Chart_MigratesPreSubstrateOwnershipBeforeCompanion(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
-	d := &fakeDeployer{statusState: deployer.ChartState{Installed: true, Status: "deployed", Version: "0.2.2"}}
+	d := &fakeDeployer{statusStates: map[string]deployer.ChartState{
+		"opo1": {Installed: true, Status: "deployed", Version: "0.2.2"},
+	}}
 	res, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, &fakeFluxer{}, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
@@ -443,6 +460,40 @@ func TestApply_Chart_MigratesPreSubstrateOwnershipBeforeCompanion(t *testing.T) 
 		selector: certificateCRDLabelSelector, release: "opo1-cert-manager", namespace: "iterabase-system",
 	}}, d.ownershipTransfers)
 	assert.Equal(t, []string{"apply", "transfer", "apply", "apply"}, d.order)
+}
+
+func TestApply_Chart_ResumesOwnershipTransferAfterFailure(t *testing.T) {
+	useTempHome(t)
+	pf := readyPf()
+	pf.Installed = true
+	p := &fakeProv{
+		pf: pf, state: inSyncState(), kubeconfig: []byte(minKubeconfig), ready: true,
+	}
+	d := &fakeDeployer{
+		statusStates: map[string]deployer.ChartState{
+			"opo1": {Installed: true, Status: "deployed", Version: "0.2.2"},
+		},
+		ownershipTransferErr: errors.New("annotation interrupted"),
+	}
+	opts := ApplyOpts{ReadyTimeout: time.Second, ReadyInterval: 10 * time.Millisecond}
+
+	_, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, &fakeFluxer{}, opts)
+	require.ErrorContains(t, err, "certificate substrate ownership migration")
+	require.Len(t, d.applyCalls, 1)
+	assert.Equal(t, "0.3.0", d.statusStates["opo1"].Version, "successful platform upgrade is live state on retry")
+	assert.False(t, d.crdsOwnedByTarget)
+
+	d.ownershipTransferErr = nil
+	res, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, &fakeFluxer{}, opts)
+	require.NoError(t, err)
+	assert.True(t, res.CertificateSubstrateApplied)
+	assert.True(t, res.ChartApplied)
+	require.Len(t, d.ownershipTransfers, 2, "retry resumes the incomplete ownership hand-off")
+	assert.True(t, d.crdsOwnedByTarget)
+	require.Len(t, d.applyCalls, 4)
+	assert.Equal(t, []string{"control-plane.toolRunner.enabled=false"}, d.applyCalls[1].values)
+	assert.Equal(t, "opo1-cert-manager", d.applyCalls[2].release)
+	assert.Equal(t, "opo1", d.applyCalls[3].release)
 }
 
 func TestApply_Chart_RequiresFluxArtifactBeforeSubstrate(t *testing.T) {

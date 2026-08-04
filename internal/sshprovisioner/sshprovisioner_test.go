@@ -710,6 +710,45 @@ func TestDeployer_Status_NotInstalled(t *testing.T) {
 	assert.False(t, st.Installed)
 }
 
+func TestDeployer_CRDOwnedBy(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{
+			name: "all selected CRDs owned by companion",
+			out: "certificates.cert-manager.io\topo1-cert-manager\titerabase-system\n" +
+				"issuers.cert-manager.io\topo1-cert-manager\titerabase-system\n",
+			want: true,
+		},
+		{
+			name: "partial transfer remains incomplete",
+			out: "certificates.cert-manager.io\topo1-cert-manager\titerabase-system\n" +
+				"issuers.cert-manager.io\topo1\titerabase-system\n",
+			want: false,
+		},
+		{name: "empty selection", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+				if strings.Contains(cmd, "'get' 'crd'") && strings.Contains(cmd, "'jsonpath=") {
+					return tt.out, 0
+				}
+				return "", 1
+			})
+			defer cleanup()
+			p := newProvisioner(t, addr, cfg)
+			defer p.Close()
+			owned, err := p.CRDOwnedBy(context.Background(),
+				"app.kubernetes.io/name=cert-manager", "opo1-cert-manager", "iterabase-system")
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, owned)
+		})
+	}
+}
+
 func TestDeployer_TransferCRDOwnership(t *testing.T) {
 	var annotate string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
