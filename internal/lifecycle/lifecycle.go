@@ -253,6 +253,7 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 const (
 	certificateSubstrateChart        = "cert-manager-substrate"
 	certificateSubstrateFirstVersion = "0.3.0"
+	certificateCRDLabelSelector      = "app.kubernetes.io/name=cert-manager"
 	fluxArtifactFirstVersion         = "0.3.0"
 )
 
@@ -286,6 +287,25 @@ func certificateSubstrateRepository(platformRepository string) (string, error) {
 
 func certificateSubstrateRelease(platformRelease string) string {
 	return platformRelease + "-cert-manager"
+}
+
+func certificateOwnershipMigrationRequired(ctx context.Context, d deployer.Deployer, ch config.Chart) (bool, error) {
+	requiresSubstrate, err := certificateSubstrateRequired(ch.Version)
+	if err != nil || !requiresSubstrate {
+		return false, err
+	}
+	state, err := d.Status(ctx, ch.Release, ch.Namespace)
+	if err != nil {
+		return false, fmt.Errorf("read platform release for certificate ownership migration: %w", err)
+	}
+	if !state.Installed {
+		return false, nil
+	}
+	have, err := canonicalChartVersion(state.Version)
+	if err != nil {
+		return false, fmt.Errorf("installed platform release: %w", err)
+	}
+	return semver.Compare(have, "v"+certificateSubstrateFirstVersion) < 0, nil
 }
 
 // applyCertificateSubstrate installs the same-version companion release before
@@ -332,7 +352,7 @@ func applyCertificateSubstrate(ctx context.Context, cfg *config.Cluster, d deplo
 // version is configured and the phase is not skipped. When an overlay is cloned
 // (overlayDest != ""), its value files feed the chart (-f values.yaml -f
 // values.client.yaml). No-op otherwise.
-func applyChart(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string) error {
+func applyChart(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string, extraValues ...string) error {
 	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" {
 		return nil
 	}
@@ -342,6 +362,7 @@ func applyChart(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, o
 		Repository: ch.Repository,
 		Version:    ch.Version,
 		Namespace:  ch.Namespace,
+		Values:     append([]string(nil), extraValues...),
 	}
 	if overlayDest != "" {
 		dopts.ValueFiles = overlayValueFiles(overlayDest)
@@ -406,6 +427,29 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 	if err := applySecrets(ctx, o, d, opts, res, overlayDest); err != nil {
 		auditFail(cfg, "apply-secrets", err)
 		return err
+	}
+
+	// Platform <=0.2.2 owns cert-manager and CSI objects in the platform Helm
+	// release. Installing the companion first would fail on those exact names.
+	// Upgrade the old owner with the new runner deferred, transfer only the kept
+	// CRD annotations, then install the companion. The normal platform apply
+	// below restores the overlay's intended runner value after Flux is Ready.
+	migration := false
+	if d != nil && !opts.SkipChart && cfg.Spec.Chart.Version != "" {
+		migration, err = certificateOwnershipMigrationRequired(ctx, d, cfg.Spec.Chart)
+		if err != nil {
+			return err
+		}
+	}
+	if migration {
+		if err := applyChart(ctx, cfg, d, opts, res, overlayDest, "control-plane.toolRunner.enabled=false"); err != nil {
+			return err
+		}
+		ch := cfg.Spec.Chart
+		if err := d.TransferCRDOwnership(ctx, certificateCRDLabelSelector, certificateSubstrateRelease(ch.Release), ch.Namespace); err != nil {
+			auditFail(cfg, "migrate-certificate-substrate-ownership", err)
+			return fmt.Errorf("certificate substrate ownership migration: %w", err)
+		}
 	}
 	if err := applyCertificateSubstrate(ctx, cfg, d, opts, res, overlayDest); err != nil {
 		return err

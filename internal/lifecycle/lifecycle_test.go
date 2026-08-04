@@ -270,6 +270,7 @@ type applyCall struct {
 }
 type repoCall struct{ name, url string }
 type uninstallCall struct{ release, namespace string }
+type ownershipTransferCall struct{ selector, release, namespace string }
 
 // fakeDeployer is a controllable deployer.Deployer for lifecycle chart tests.
 type fakeDeployer struct {
@@ -279,10 +280,12 @@ type fakeDeployer struct {
 	applyKustomizeCalls  []string
 	deleteKustomizeCalls []string
 	applyManifestCalls   []string // captured manifests (JSON) piped via stdin
-	order                []string // ordered op log: "manifest" | "apply" | "kustomize" (phase ordering)
+	ownershipTransfers   []ownershipTransferCall
+	order                []string // ordered op log: "manifest" | "apply" | "transfer" | "kustomize" (phase ordering)
 	statusState          deployer.ChartState
 	applyErr             error
 	applyManifestErr     error
+	ownershipTransferErr error
 }
 
 func (f *fakeDeployer) Apply(_ context.Context, opts deployer.ApplyOpts) error {
@@ -317,6 +320,11 @@ func (f *fakeDeployer) EnsureRepo(_ context.Context, name, url string) error {
 func (f *fakeDeployer) Status(_ context.Context, _, _ string) (*deployer.ChartState, error) {
 	s := f.statusState
 	return &s, nil
+}
+func (f *fakeDeployer) TransferCRDOwnership(_ context.Context, selector, release, namespace string) error {
+	f.ownershipTransfers = append(f.ownershipTransfers, ownershipTransferCall{selector, release, namespace})
+	f.order = append(f.order, "transfer")
+	return f.ownershipTransferErr
 }
 func (f *fakeDeployer) UninstallChart(_ context.Context, release, ns string) error {
 	f.uninstallCalls = append(f.uninstallCalls, uninstallCall{release, ns})
@@ -413,6 +421,28 @@ func TestApply_Chart(t *testing.T) {
 	assert.Equal(t, "0.3.0", platform.version)
 	assert.Equal(t, "opo1", platform.release)
 	assert.Equal(t, "iterabase-system", platform.namespace)
+}
+
+func TestApply_Chart_MigratesPreSubstrateOwnershipBeforeCompanion(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{statusState: deployer.ChartState{Installed: true, Status: "deployed", Version: "0.2.2"}}
+	res, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.CertificateSubstrateApplied)
+	assert.True(t, res.ChartApplied)
+	require.Len(t, d.applyCalls, 3)
+	assert.Equal(t, "opo1", d.applyCalls[0].release, "old platform owner upgrades before companion install")
+	assert.Equal(t, []string{"control-plane.toolRunner.enabled=false"}, d.applyCalls[0].values)
+	assert.Equal(t, "opo1-cert-manager", d.applyCalls[1].release)
+	assert.Equal(t, "opo1", d.applyCalls[2].release, "normal values reconcile after the companion is Ready")
+	assert.Empty(t, d.applyCalls[2].values)
+	require.Equal(t, []ownershipTransferCall{{
+		selector: certificateCRDLabelSelector, release: "opo1-cert-manager", namespace: "iterabase-system",
+	}}, d.ownershipTransfers)
+	assert.Equal(t, []string{"apply", "transfer", "apply", "apply"}, d.order)
 }
 
 func TestApply_Chart_RequiresFluxArtifactBeforeSubstrate(t *testing.T) {
