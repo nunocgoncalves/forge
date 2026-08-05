@@ -226,6 +226,12 @@ func (state *digitalOceanCPUState) dumpDiagnostics(t *testing.T) {
 	t.Logf("debug pod dump (on failure):\n%s", out)
 	events, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get events -A --sort-by=.lastTimestamp 2>&1 | tail -30")
 	t.Logf("debug events (tail):\n%s", events)
+	runnerState, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get pods -n iterabase-system -l app.kubernetes.io/component=tool-runner -o yaml 2>&1")
+	t.Logf("debug tool-runner state:\n%s", runnerState)
+	runnerLogs, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml logs -n iterabase-system -l app.kubernetes.io/component=tool-runner --all-containers --prefix --tail=200 2>&1")
+	t.Logf("debug tool-runner logs:\n%s", runnerLogs)
+	runnerPrevious, _ := sshOutput(sc, "for c in materializer runner; do echo --- $c previous; sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml logs -n iterabase-system -l app.kubernetes.io/component=tool-runner -c $c --previous --tail=200 2>&1 || true; done")
+	t.Logf("debug tool-runner previous logs:\n%s", runnerPrevious)
 }
 
 func generateKey(t *testing.T) (pubKeyStr, privKeyPath string) {

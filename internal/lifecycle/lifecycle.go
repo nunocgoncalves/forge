@@ -368,6 +368,10 @@ func applyCertificateSubstrate(ctx context.Context, cfg *config.Cluster, d deplo
 // (overlayDest != ""), its value files feed the chart (-f values.yaml -f
 // values.client.yaml). No-op otherwise.
 func applyChart(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string, extraValues ...string) error {
+	return applyChartWithWait(ctx, cfg, d, opts, res, overlayDest, false, extraValues...)
+}
+
+func applyChartWithWait(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string, noWait bool, extraValues ...string) error {
 	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" {
 		return nil
 	}
@@ -378,6 +382,7 @@ func applyChart(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, o
 		Version:    ch.Version,
 		Namespace:  ch.Namespace,
 		Values:     append([]string(nil), extraValues...),
+		NoWait:     noWait,
 	}
 	if overlayDest != "" {
 		dopts.ValueFiles = overlayValueFiles(overlayDest)
@@ -392,13 +397,13 @@ func applyChart(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, o
 
 // migrateCertificateOwnership performs the one-time platform-first hand-off
 // from the <=0.2.2 bundled cert-manager resources to the 0.3 companion release.
-func migrateCertificateOwnership(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string) error {
+func migrateCertificateOwnership(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string) (bool, error) {
 	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" {
-		return nil
+		return false, nil
 	}
 	migration, err := certificateOwnershipMigrationRequired(ctx, d, cfg.Spec.Chart)
 	if err != nil || !migration {
-		return err
+		return false, err
 	}
 	ch := cfg.Spec.Chart
 	// The old cert-issuers subchart created ClusterIssuers and internal CA
@@ -406,16 +411,16 @@ func migrateCertificateOwnership(ctx context.Context, cfg *config.Cluster, d dep
 	// release before 0.3 renders them as normal resources.
 	if err := d.TransferCertificateHookOwnership(ctx, certificateHookLabelSelector(ch.Release), ch.Release, ch.Namespace); err != nil {
 		auditFail(cfg, "migrate-certificate-hook-ownership", err)
-		return fmt.Errorf("certificate hook ownership migration: %w", err)
+		return false, fmt.Errorf("certificate hook ownership migration: %w", err)
 	}
 	if err := applyChart(ctx, cfg, d, opts, res, overlayDest, "control-plane.toolRunner.enabled=false"); err != nil {
-		return err
+		return false, err
 	}
 	if err := d.TransferCRDOwnership(ctx, certificateCRDLabelSelector, certificateSubstrateRelease(ch.Release), ch.Namespace); err != nil {
 		auditFail(cfg, "migrate-certificate-substrate-ownership", err)
-		return fmt.Errorf("certificate substrate ownership migration: %w", err)
+		return false, fmt.Errorf("certificate substrate ownership migration: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // cloneOverlay clones the client fork when overlay.repo is configured, returning
@@ -477,7 +482,8 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 	// Upgrade the old owner with the new runner deferred, transfer only the kept
 	// CRD annotations, then install the companion. The normal platform apply
 	// below restores the overlay's intended runner value after Flux is Ready.
-	if err := migrateCertificateOwnership(ctx, cfg, d, opts, res, overlayDest); err != nil {
+	migrated, err := migrateCertificateOwnership(ctx, cfg, d, opts, res, overlayDest)
+	if err != nil {
 		return err
 	}
 	if err := applyCertificateSubstrate(ctx, cfg, d, opts, res, overlayDest); err != nil {
@@ -485,6 +491,20 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 	}
 	if err := applyFluxSourcePhase(ctx, cfg, f, d, opts, res, overlayCommit); err != nil {
 		return err
+	}
+	if migrated {
+		// The migration's guarded platform apply intentionally omitted the runner,
+		// so the existing gateway Pod loaded no approved runner identity. Publish
+		// the final ConfigMap without waiting, restart only that gateway, then let
+		// the normal waited Helm reconcile below gate on runner registration.
+		if err := applyChartWithWait(ctx, cfg, d, opts, res, overlayDest, true); err != nil {
+			return err
+		}
+		selector := "app.kubernetes.io/name=control-plane,app.kubernetes.io/instance=" + cfg.Spec.Chart.Release + ",app.kubernetes.io/component=gateway"
+		if err := d.RestartDeployment(ctx, selector, cfg.Spec.Chart.Namespace); err != nil {
+			auditFail(cfg, "restart-migrated-gateway", err)
+			return fmt.Errorf("restart migrated gateway: %w", err)
+		}
 	}
 	if err := applyChart(ctx, cfg, d, opts, res, overlayDest); err != nil {
 		return err

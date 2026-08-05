@@ -25,6 +25,7 @@ type ApplyOpts struct {
 	Namespace  string   // target namespace (--create-namespace)
 	Values     []string // --set inline values (e.g. GPU operator overrides)
 	ValueFiles []string // -f value files, applied in order (later wins); overlay values
+	NoWait     bool     // omit Helm --wait; used only to break the 0.2 -> 0.3 gateway-config rollout dependency
 }
 
 // Deployer abstracts cluster-level manifest operations (Helm + kustomize). One
@@ -53,6 +54,9 @@ type Deployer interface {
 	// different Helm release. Used only for the platform 0.2.x -> 0.3 substrate
 	// ownership hand-off; CRD contents and custom resources are left untouched.
 	TransferCRDOwnership(ctx context.Context, labelSelector, release, namespace string) error
+	// RestartDeployment rolls Deployments selected by label and waits for the
+	// rollout. Used by the 0.2 -> 0.3 migration after publishing gateway config.
+	RestartDeployment(ctx context.Context, labelSelector, namespace string) error
 	// UninstallChart removes the Helm release. A missing release is not an error.
 	UninstallChart(ctx context.Context, release, namespace string) error
 	// ApplyKustomize runs `kubectl apply -k dir` against the k3s kubeconfig on

@@ -554,6 +554,33 @@ func TestDeployer_Apply(t *testing.T) {
 	assert.Contains(t, got, "--set")
 	assert.Contains(t, got, "driver.enabled=true")
 	assert.Contains(t, got, "toolkit.enabled=true")
+	assert.Contains(t, got, "'--wait'")
+}
+
+func TestDeployer_Apply_NoWait(t *testing.T) {
+	var got string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v helm":
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "'show' 'crds'"):
+			return "", 0
+		case strings.Contains(cmd, "'upgrade' '--install'"):
+			got = cmd
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.Apply(context.Background(), deployer.ApplyOpts{
+		Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
+		Version: "0.3.0", Namespace: "iterabase-system", NoWait: true,
+	}))
+	assert.NotContains(t, got, "'--wait'")
+	assert.Contains(t, got, "'--timeout' '10m'")
 }
 
 func TestDeployer_Apply_ReconcilesCRDsBeforeUpgrade(t *testing.T) {
@@ -846,6 +873,25 @@ func TestDeployer_TransferCRDOwnership(t *testing.T) {
 	assert.Contains(t, annotate, "'customresourcedefinition.apiextensions.k8s.io/certificates.cert-manager.io'")
 	assert.Contains(t, annotate, "'meta.helm.sh/release-name=opo1-cert-manager'")
 	assert.Contains(t, annotate, "'meta.helm.sh/release-namespace=iterabase-system'")
+}
+
+func TestDeployer_RestartDeployment(t *testing.T) {
+	var commands []string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		commands = append(commands, cmd)
+		return "", 0
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.RestartDeployment(context.Background(),
+		"app.kubernetes.io/name=control-plane,app.kubernetes.io/instance=opo1,app.kubernetes.io/component=gateway",
+		"iterabase-system"))
+	require.Len(t, commands, 2)
+	assert.Contains(t, commands[0], "'rollout' 'restart' 'deployment' '-n' 'iterabase-system'")
+	assert.Contains(t, commands[0], "'-l=app.kubernetes.io/name=control-plane,app.kubernetes.io/instance=opo1,app.kubernetes.io/component=gateway'")
+	assert.Contains(t, commands[1], "'rollout' 'status' 'deployment'")
+	assert.Contains(t, commands[1], "'--timeout=5m'")
 }
 
 func TestDeployer_UninstallChart(t *testing.T) {
