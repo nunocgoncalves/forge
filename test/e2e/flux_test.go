@@ -3,7 +3,6 @@ package e2e
 import (
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -67,7 +66,7 @@ func runFluxStage(t *testing.T, state *digitalOceanCPUState) {
 	if gitArtifact == "" || gitDigest == "" {
 		t.Fatalf("GitRepository overlay has no exact materialized revision/digest — source-controller did not fetch the fork")
 	}
-	if !regexp.MustCompile(`^sha256:[a-f0-9]{64}$`).MatchString(gitDigest) {
+	if !isCanonicalSHA256Digest(gitDigest) {
 		t.Fatalf("GitRepository overlay artifact digest is not canonical sha256: %q", gitDigest)
 	}
 

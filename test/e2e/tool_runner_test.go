@@ -27,7 +27,7 @@ const fluxInstallManifest = "https://github.com/fluxcd/flux2/releases/download/v
 // this fresh Kind scenario proves the released boundaries compose:
 //
 //	Flux GitRepository artifact -> materializer -> read-only generation volume
-//	-> Node runner -> chart-issued mTLS -> gateway registration -> rollover.
+//	-> Node runner -> chart-issued mTLS -> gateway registration -> pinned drain.
 //
 // Forge's DigitalOcean Flux stage separately proves forge installs and gates on
 // the exact source revision/digest. This Kind contract deliberately uses the
@@ -79,8 +79,8 @@ spec:
 	cluster.Kubectl(t, "wait", "-n", "flux-system", "--for=condition=Ready", "gitrepository/overlay", "--timeout=180s")
 	artifactRevision := strings.TrimSpace(cluster.Kubectl(t, "get", "gitrepository", "overlay", "-n", "flux-system", "-o", "jsonpath={.status.artifact.revision}"))
 	artifactDigest := strings.TrimSpace(cluster.Kubectl(t, "get", "gitrepository", "overlay", "-n", "flux-system", "-o", "jsonpath={.status.artifact.digest}"))
-	if artifactRevision == "" || !strings.HasPrefix(artifactDigest, "sha256:") || len(artifactDigest) != 71 {
-		t.Fatalf("Flux did not publish an exact revision/digest: revision=%q digest=%q", artifactRevision, artifactDigest)
+	if artifactRevision == "" || !isCanonicalSHA256Digest(artifactDigest) {
+		t.Fatalf("Flux did not publish an exact revision/canonical digest: revision=%q digest=%q", artifactRevision, artifactDigest)
 	}
 	applyManifest(t, cluster, `apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -143,11 +143,11 @@ spec:
 	password := decodeSecret(t, cluster.Kubectl(t, "get", "secret", "tool-postgresql", "-n", namespace, "-o", "jsonpath={.data.password}"))
 	waitRegistration(t, cluster, namespace, postgresPod, password,
 		fmt.Sprintf("SELECT count(*) FROM toolgateway.runner_registrations WHERE tool_name='platform.echo' AND tool_digest='%s' AND active AND accepting_new", v1.digest), "1")
+	v1Attempt := createPinnedToolAttempt(t, cluster, namespace, postgresPod, password, v1.digest)
 
-	// Publish a second exact revision. With no unfinished v1 pin, the coordinated
-	// drain releases it after v2 is accepted. Attempt pin routing and unavailable
-	// old-version behavior are covered behaviorally by control-plane integration
-	// tests, not by reaching into Postgres to manufacture attempts here.
+	// Publish a second exact revision while a real unfinished work attempt pins
+	// v1. The runner must keep v1 loaded for that attempt while removing it from
+	// new-attempt eligibility and registering v2 as the current generation.
 	gitPod := cluster.FirstPodName(t, "default", "app=tool-git")
 	cluster.Kubectl(t, "cp", "-n", "default", v2.bundlePath, gitPod+":/git/repo/tools/product/echo/index.mjs")
 	cluster.Kubectl(t, "cp", "-n", "default", v2.manifestPath, gitPod+":/git/repo/tools/product/echo/manifest.json")
@@ -159,9 +159,16 @@ spec:
 	waitRegistration(t, cluster, namespace, postgresPod, password,
 		fmt.Sprintf("SELECT count(*) FROM toolgateway.runner_registrations WHERE tool_name='platform.echo' AND tool_digest='%s' AND active AND accepting_new", v2.digest), "1")
 	waitRegistration(t, cluster, namespace, postgresPod, password,
+		fmt.Sprintf("SELECT count(*) FROM toolgateway.runner_registrations WHERE tool_name='platform.echo' AND tool_digest='%s' AND active AND NOT accepting_new", v1.digest), "1")
+	waitRegistration(t, cluster, namespace, postgresPod, password,
+		fmt.Sprintf("SELECT tool_version_digest FROM toolgateway.attempt_tool_pins WHERE attempt_id='%s' AND tool_name='platform.echo'", v1Attempt), v1.digest)
+	_ = createPinnedToolAttempt(t, cluster, namespace, postgresPod, password, v2.digest)
+
+	completeToolAttempt(t, cluster, namespace, postgresPod, password, v1Attempt)
+	waitRegistration(t, cluster, namespace, postgresPod, password,
 		fmt.Sprintf("SELECT count(*) FROM toolgateway.runner_registrations WHERE tool_name='platform.echo' AND tool_digest='%s' AND active", v1.digest), "0")
 
-	t.Logf("exact Flux artifact %s (%s) materialized; v1 registered, v2 rolled over, and unpinned v1 retired", artifactRevision, artifactDigest)
+	t.Logf("exact Flux artifact %s (%s) materialized; v1 stayed routable while pinned, v2 accepted new attempts, and v1 retired after its attempt completed", artifactRevision, artifactDigest)
 }
 
 type toolRevision struct {
@@ -373,12 +380,77 @@ func applyManifest(t *testing.T, cluster *kindtest.Cluster, manifest string) {
 	cluster.Kubectl(t, "apply", "-f", path)
 }
 
+func createPinnedToolAttempt(t *testing.T, cluster *kindtest.Cluster, namespace, postgresPod, password, expectedDigest string) string {
+	t.Helper()
+	key := fmt.Sprintf("tool-contract-%d", time.Now().UnixNano())
+	query := fmt.Sprintf(`
+WITH identity_row AS (
+  INSERT INTO identity.identities (key,kind,source,display_name)
+  VALUES ('%[1]s','workflow','local','Tool contract') RETURNING id
+), definition_row AS (
+  INSERT INTO workflow.definitions (key,version,digest,spec_json,scope_identity_id,source_type,pool_key)
+  SELECT '%[1]s','1','sha256:test','{}',id,'operator_artifact','tool-contract' FROM identity_row
+  RETURNING id,scope_identity_id
+), run_row AS (
+  INSERT INTO runtime.workflow_runs (kind,definition_key,scope_identity_id,session_id,session_dir,state,started_at)
+  SELECT 'workflow','%[1]s:1',scope_identity_id,'%[1]s','/sessions/%[1]s','running',now() FROM definition_row
+  RETURNING id,scope_identity_id
+), work_item_row AS (
+  INSERT INTO work.work_items (workflow_key,scope_identity_id,title,start_identity_id,start_idempotency_key,start_payload_hash)
+  SELECT '%[1]s',scope_identity_id,'Tool contract',scope_identity_id,'%[1]s','sha256:test' FROM run_row
+  RETURNING id
+), attempt_row AS (
+  INSERT INTO work.attempts (id,work_item_id,number,definition_id,definition_key,definition_version,definition_digest,graph_snapshot)
+  SELECT r.id,w.id,1,d.id,'%[1]s:1','1','sha256:test','{}'
+  FROM run_row r CROSS JOIN work_item_row w CROSS JOIN definition_row d
+  RETURNING id,work_item_id
+), linked_item AS (
+  UPDATE work.work_items w SET current_attempt_id=a.id FROM attempt_row a WHERE w.id=a.work_item_id
+), pin_row AS (
+  INSERT INTO toolgateway.attempt_tool_pins (attempt_id,tool_name,tool_version_digest)
+  SELECT a.id::text,'platform.echo',v.digest
+  FROM attempt_row a
+  CROSS JOIN LATERAL (
+    SELECT digest FROM toolgateway.available_tool_versions
+    WHERE name='platform.echo' ORDER BY created_at DESC,id DESC LIMIT 1
+  ) v
+  RETURNING tool_version_digest
+)
+SELECT a.id::text || '|' || p.tool_version_digest FROM attempt_row a CROSS JOIN pin_row p`, key)
+	out, err := postgresQuery(t, cluster, namespace, postgresPod, password, query)
+	if err != nil {
+		t.Fatalf("create pinned tool attempt: %v\n%s", err, out)
+	}
+	attemptID, digest, ok := strings.Cut(strings.TrimSpace(out), "|")
+	if !ok || attemptID == "" || digest != expectedDigest {
+		t.Fatalf("new attempt did not pin expected tool version %q: %q", expectedDigest, out)
+	}
+	return attemptID
+}
+
+func completeToolAttempt(t *testing.T, cluster *kindtest.Cluster, namespace, postgresPod, password, attemptID string) {
+	t.Helper()
+	query := fmt.Sprintf(`
+WITH finished_attempt AS (
+  UPDATE work.attempts SET finished_at=now()
+  WHERE id='%[1]s'::uuid AND finished_at IS NULL RETURNING id
+), finished_run AS (
+  UPDATE runtime.workflow_runs r SET state='succeeded',finished_at=now(),updated_at=now()
+  FROM finished_attempt a WHERE r.id=a.id RETURNING r.id
+)
+SELECT count(*) FROM finished_run`, attemptID)
+	out, err := postgresQuery(t, cluster, namespace, postgresPod, password, query)
+	if err != nil || strings.TrimSpace(out) != "1" {
+		t.Fatalf("complete pinned tool attempt %s: %v (output %q)", attemptID, err, out)
+	}
+}
+
 func waitRegistration(t *testing.T, cluster *kindtest.Cluster, namespace, postgresPod, password, query, expected string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Minute)
 	var last string
 	for time.Now().Before(deadline) {
-		out, err := cluster.Exec(t, namespace, postgresPod, "", fmt.Sprintf("env PGPASSWORD=%s psql -U controlplane -d controlplane -Atqc %s", shellQuote(password), shellQuote(query)))
+		out, err := postgresQuery(t, cluster, namespace, postgresPod, password, query)
 		last = strings.TrimSpace(out)
 		if err == nil && last == expected {
 			return
@@ -386,6 +458,11 @@ func waitRegistration(t *testing.T, cluster *kindtest.Cluster, namespace, postgr
 		time.Sleep(2 * time.Second)
 	}
 	t.Fatalf("registration query did not reach %q (last %q): %s", expected, last, query)
+}
+
+func postgresQuery(t *testing.T, cluster *kindtest.Cluster, namespace, postgresPod, password, query string) (string, error) {
+	t.Helper()
+	return cluster.Exec(t, namespace, postgresPod, "", fmt.Sprintf("env PGPASSWORD=%s psql -U controlplane -d controlplane -Atqc %s", shellQuote(password), shellQuote(query)))
 }
 
 func decodeSecret(t *testing.T, value string) string {
