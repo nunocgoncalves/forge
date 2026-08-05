@@ -46,6 +46,11 @@ type Deployer interface {
 	// CRDOwnedBy reports whether every CRD selected by label carries the given
 	// Helm release ownership annotations. An empty selection reports false.
 	CRDOwnedBy(ctx context.Context, labelSelector, release, namespace string) (bool, error)
+	// CRDsAnnotated reports whether every selected CRD has annotation=value.
+	// It provides a durable completion checkpoint across interrupted migrations.
+	CRDsAnnotated(ctx context.Context, labelSelector, annotation, value string) (bool, error)
+	// AnnotateCRDs sets annotation=value on every selected CRD.
+	AnnotateCRDs(ctx context.Context, labelSelector, annotation, value string) error
 	// TransferCertificateHookOwnership annotates the certificate resources that
 	// platform 0.2.x created as unowned Helm hooks so the 0.3 platform release can
 	// adopt them during upgrade without deleting issuers, roots, or leaf Secrets.

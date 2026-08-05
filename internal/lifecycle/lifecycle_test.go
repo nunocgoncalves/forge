@@ -288,6 +288,7 @@ type fakeDeployer struct {
 	order                    []string // ordered op log for phase-ordering assertions
 	statusStates             map[string]deployer.ChartState
 	crdsOwnedByTarget        bool
+	crdsMigrationComplete    bool
 	applyErr                 error
 	applyManifestErr         error
 	ownershipTransferErr     error
@@ -336,6 +337,14 @@ func (f *fakeDeployer) Status(_ context.Context, release, _ string) (*deployer.C
 }
 func (f *fakeDeployer) CRDOwnedBy(_ context.Context, _, _, _ string) (bool, error) {
 	return f.crdsOwnedByTarget, nil
+}
+func (f *fakeDeployer) CRDsAnnotated(_ context.Context, _, _, _ string) (bool, error) {
+	return f.crdsMigrationComplete, nil
+}
+func (f *fakeDeployer) AnnotateCRDs(_ context.Context, _, _, _ string) error {
+	f.crdsMigrationComplete = true
+	f.order = append(f.order, "annotate-crds")
+	return nil
 }
 func (f *fakeDeployer) TransferCertificateHookOwnership(_ context.Context, selector, release, namespace string) error {
 	f.hookOwnershipTransfers = append(f.hookOwnershipTransfers, ownershipTransferCall{selector, release, namespace})
@@ -483,7 +492,29 @@ func TestApply_Chart_MigratesPreSubstrateOwnershipBeforeCompanion(t *testing.T) 
 		selector:  "app.kubernetes.io/name=control-plane,app.kubernetes.io/instance=opo1,app.kubernetes.io/component=gateway",
 		namespace: "iterabase-system",
 	}}, d.restarts)
-	assert.Equal(t, []string{"hook-transfer", "apply", "crd-transfer", "apply", "apply", "restart", "apply"}, d.order)
+	assert.True(t, d.crdsMigrationComplete)
+	assert.Equal(t, []string{"hook-transfer", "apply", "crd-transfer", "apply", "apply", "restart", "apply", "annotate-crds"}, d.order)
+}
+
+func TestApply_Chart_ResumesAfterCRDOwnershipBeforeGatewayRestart(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{
+		statusStates: map[string]deployer.ChartState{
+			"opo1": {Installed: true, Status: "deployed", Version: "0.3.0"},
+		},
+		crdsOwnedByTarget: true,
+	}
+	res, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.CertificateSubstrateApplied)
+	assert.True(t, d.crdsMigrationComplete)
+	require.Len(t, d.restarts, 1, "missing completion checkpoint must replay the staged gateway rollout")
+	require.Len(t, d.applyCalls, 4)
+	assert.Equal(t, []string{"control-plane.toolRunner.enabled=false"}, d.applyCalls[0].values)
+	assert.True(t, d.applyCalls[2].noWait)
 }
 
 func TestApply_Chart_ResumesOwnershipTransferAfterFailure(t *testing.T) {
@@ -1188,7 +1219,7 @@ func TestApply_Flux(t *testing.T) {
 
 	// Source manifests precede Helm so the runner can load a generation during
 	// --wait; continuous reconciliation starts only after the one-time CR apply.
-	require.Equal(t, []string{"apply", "manifest", "manifest", "manifest", "apply", "kustomize", "manifest"}, d.order)
+	require.Equal(t, []string{"apply", "manifest", "manifest", "manifest", "apply", "annotate-crds", "kustomize", "manifest"}, d.order)
 }
 
 func TestApply_Flux_PublicRepoNoToken(t *testing.T) {

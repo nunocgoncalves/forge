@@ -254,6 +254,8 @@ const (
 	certificateSubstrateChart        = "cert-manager-substrate"
 	certificateSubstrateFirstVersion = "0.3.0"
 	certificateCRDLabelSelector      = "app.kubernetes.io/name=cert-manager"
+	certificateMigrationAnnotation   = "forge.horizonshift.io/certificate-substrate-migration"
+	certificateMigrationComplete     = "0.3.0"
 	fluxArtifactFirstVersion         = "0.3.0"
 )
 
@@ -320,7 +322,14 @@ func certificateOwnershipMigrationRequired(ctx context.Context, d deployer.Deplo
 	if err != nil {
 		return false, fmt.Errorf("read certificate CRD ownership migration state: %w", err)
 	}
-	return !owned, nil
+	if !owned {
+		return true, nil
+	}
+	complete, err := d.CRDsAnnotated(ctx, certificateCRDLabelSelector, certificateMigrationAnnotation, certificateMigrationComplete)
+	if err != nil {
+		return false, fmt.Errorf("read certificate migration completion state: %w", err)
+	}
+	return !complete, nil
 }
 
 // applyCertificateSubstrate installs the same-version companion release before
@@ -492,6 +501,21 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 	if err := applyFluxSourcePhase(ctx, cfg, f, d, opts, res, overlayCommit); err != nil {
 		return err
 	}
+	if err := applyPlatformChartPhase(ctx, cfg, d, opts, res, overlayDest, migrated); err != nil {
+		return err
+	}
+	if err := applyCRDInstances(ctx, d, overlayDest); err != nil {
+		auditFail(cfg, "apply-overlay", err)
+		return err
+	}
+	if err := applyFluxReconciliationPhase(ctx, cfg, d, opts); err != nil {
+		return err
+	}
+	res.OverlayApplied = overlayDest != ""
+	return nil
+}
+
+func applyPlatformChartPhase(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string, migrated bool) error {
 	if migrated {
 		// The migration's guarded platform apply intentionally omitted the runner,
 		// so the existing gateway Pod loaded no approved runner identity. Publish
@@ -509,14 +533,17 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 	if err := applyChart(ctx, cfg, d, opts, res, overlayDest); err != nil {
 		return err
 	}
-	if err := applyCRDInstances(ctx, d, overlayDest); err != nil {
-		auditFail(cfg, "apply-overlay", err)
+	if cfg.Spec.Chart.Version == "" || d == nil || opts.SkipChart {
+		return nil
+	}
+	requiresSubstrate, err := certificateSubstrateRequired(cfg.Spec.Chart.Version)
+	if err != nil || !requiresSubstrate {
 		return err
 	}
-	if err := applyFluxReconciliationPhase(ctx, cfg, d, opts); err != nil {
-		return err
+	if err := d.AnnotateCRDs(ctx, certificateCRDLabelSelector, certificateMigrationAnnotation, certificateMigrationComplete); err != nil {
+		auditFail(cfg, "mark-certificate-migration-complete", err)
+		return fmt.Errorf("mark certificate migration complete: %w", err)
 	}
-	res.OverlayApplied = overlayDest != ""
 	return nil
 }
 
