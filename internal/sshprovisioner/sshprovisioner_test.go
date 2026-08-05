@@ -691,6 +691,49 @@ func TestDeployer_Status(t *testing.T) {
 	assert.Equal(t, "0.1.0", st.Version)
 }
 
+func TestDeployer_Status_Helm4UsesMetadataVersion(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v helm":
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "'status'"):
+			return `{"name":"opo1","version":19,"info":{"status":"deployed"}}`, 0
+		case strings.Contains(cmd, "'get' 'metadata'"):
+			return `{"name":"opo1","chart":"iterabase-platform","version":"0.2.2","status":"deployed"}`, 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	st, err := p.Status(context.Background(), "opo1", "iterabase-system")
+	require.NoError(t, err)
+	assert.True(t, st.Installed)
+	assert.Equal(t, "deployed", st.Status)
+	assert.Equal(t, "0.2.2", st.Version)
+}
+
+func TestDeployer_Status_Helm4RejectsMissingMetadataVersion(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v helm":
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "'status'"):
+			return `{"name":"opo1","version":19,"info":{"status":"deployed"}}`, 0
+		case strings.Contains(cmd, "'get' 'metadata'"):
+			return `{"name":"opo1","chart":"iterabase-platform","version":""}`, 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	_, err := p.Status(context.Background(), "opo1", "iterabase-system")
+	require.ErrorContains(t, err, "chart version is empty")
+}
+
 func TestDeployer_Status_NotInstalled(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
