@@ -274,19 +274,21 @@ type ownershipTransferCall struct{ selector, release, namespace string }
 
 // fakeDeployer is a controllable deployer.Deployer for lifecycle chart tests.
 type fakeDeployer struct {
-	applyCalls           []applyCall
-	repoCalls            []repoCall
-	uninstallCalls       []uninstallCall
-	applyKustomizeCalls  []string
-	deleteKustomizeCalls []string
-	applyManifestCalls   []string // captured manifests (JSON) piped via stdin
-	ownershipTransfers   []ownershipTransferCall
-	order                []string // ordered op log: "manifest" | "apply" | "transfer" | "kustomize" (phase ordering)
-	statusStates         map[string]deployer.ChartState
-	crdsOwnedByTarget    bool
-	applyErr             error
-	applyManifestErr     error
-	ownershipTransferErr error
+	applyCalls               []applyCall
+	repoCalls                []repoCall
+	uninstallCalls           []uninstallCall
+	applyKustomizeCalls      []string
+	deleteKustomizeCalls     []string
+	applyManifestCalls       []string // captured manifests (JSON) piped via stdin
+	ownershipTransfers       []ownershipTransferCall
+	hookOwnershipTransfers   []ownershipTransferCall
+	order                    []string // ordered op log for phase-ordering assertions
+	statusStates             map[string]deployer.ChartState
+	crdsOwnedByTarget        bool
+	applyErr                 error
+	applyManifestErr         error
+	ownershipTransferErr     error
+	hookOwnershipTransferErr error
 }
 
 func (f *fakeDeployer) Apply(_ context.Context, opts deployer.ApplyOpts) error {
@@ -332,9 +334,14 @@ func (f *fakeDeployer) Status(_ context.Context, release, _ string) (*deployer.C
 func (f *fakeDeployer) CRDOwnedBy(_ context.Context, _, _, _ string) (bool, error) {
 	return f.crdsOwnedByTarget, nil
 }
+func (f *fakeDeployer) TransferCertificateHookOwnership(_ context.Context, selector, release, namespace string) error {
+	f.hookOwnershipTransfers = append(f.hookOwnershipTransfers, ownershipTransferCall{selector, release, namespace})
+	f.order = append(f.order, "hook-transfer")
+	return f.hookOwnershipTransferErr
+}
 func (f *fakeDeployer) TransferCRDOwnership(_ context.Context, selector, release, namespace string) error {
 	f.ownershipTransfers = append(f.ownershipTransfers, ownershipTransferCall{selector, release, namespace})
-	f.order = append(f.order, "transfer")
+	f.order = append(f.order, "crd-transfer")
 	if f.ownershipTransferErr != nil {
 		return f.ownershipTransferErr
 	}
@@ -457,9 +464,12 @@ func TestApply_Chart_MigratesPreSubstrateOwnershipBeforeCompanion(t *testing.T) 
 	assert.Equal(t, "opo1", d.applyCalls[2].release, "normal values reconcile after the companion is Ready")
 	assert.Empty(t, d.applyCalls[2].values)
 	require.Equal(t, []ownershipTransferCall{{
+		selector: certificateHookLabelSelector, release: "opo1", namespace: "iterabase-system",
+	}}, d.hookOwnershipTransfers)
+	require.Equal(t, []ownershipTransferCall{{
 		selector: certificateCRDLabelSelector, release: "opo1-cert-manager", namespace: "iterabase-system",
 	}}, d.ownershipTransfers)
-	assert.Equal(t, []string{"apply", "transfer", "apply", "apply"}, d.order)
+	assert.Equal(t, []string{"hook-transfer", "apply", "crd-transfer", "apply", "apply"}, d.order)
 }
 
 func TestApply_Chart_ResumesOwnershipTransferAfterFailure(t *testing.T) {
