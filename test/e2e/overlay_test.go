@@ -48,7 +48,7 @@ func writeCurrentOverlayForgeConfig(t *testing.T, name, ip, keyPath, chartVersio
 		Name: name, Address: ip, SSHKeyPath: keyPath, RunLabel: true, DualStack: true,
 		ChartVersion: chartVersion,
 		OverlayRepo:  "https://github.com/nunocgoncalves/iterabase-overlay.git",
-		OverlayRef:   envOr("FORGE_E2E_OVERLAY_REF", "HOR-397-forge-e2e-tool-fixture"),
+		OverlayRef:   envOr("FORGE_E2E_OVERLAY_REF", "e2e"),
 		Flux:         true,
 	})
 }
