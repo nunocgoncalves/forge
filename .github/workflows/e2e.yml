@@ -96,11 +96,45 @@ jobs:
           - name: internal-tls
             target: test-e2e-internal-tls
             timeout: 25
+          - name: tool-runner-contract
+            target: test-e2e-tool-runner
+            timeout: 35
     concurrency:
       group: e2e-kind-${{ matrix.name }}-${{ github.ref }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
+      - name: resolve coordinated ticket branches
+        if: matrix.name == 'tool-runner-contract'
+        id: coordinated-refs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ticket=$(printf '%s' "${GITHUB_HEAD_REF:-}" | grep -oE '^HOR-[0-9]+' || true)
+          resolve_ref() {
+            local repository=$1 ref=""
+            if [ -n "$ticket" ]; then
+              ref=$(gh api --paginate "repos/$repository/branches?per_page=100" \
+                --jq ".[] | select(.name | startswith(\"${ticket}-\")) | .name" | head -1)
+            fi
+            printf '%s' "${ref:-master}"
+          }
+          echo "control_plane_ref=$(resolve_ref nunocgoncalves/control-plane)" >> "$GITHUB_OUTPUT"
+          echo "charts_ref=$(resolve_ref nunocgoncalves/iterabase-charts)" >> "$GITHUB_OUTPUT"
+      - name: checkout coordinated control-plane source
+        if: matrix.name == 'tool-runner-contract'
+        uses: actions/checkout@v7
+        with:
+          repository: nunocgoncalves/control-plane
+          ref: ${{ steps.coordinated-refs.outputs.control_plane_ref }}
+          path: dependencies/control-plane
+      - name: checkout coordinated chart source
+        if: matrix.name == 'tool-runner-contract'
+        uses: actions/checkout@v7
+        with:
+          repository: nunocgoncalves/iterabase-charts
+          ref: ${{ steps.coordinated-refs.outputs.charts_ref }}
+          path: dependencies/iterabase-charts
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26.x"
@@ -116,3 +150,5 @@ jobs:
         run: make ${{ matrix.target }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ITERABASE_CONTROL_PLANE_ROOT: ${{ github.workspace }}/dependencies/control-plane
+          ITERABASE_CHARTS_ROOT: ${{ github.workspace }}/dependencies/iterabase-charts

@@ -1150,7 +1150,7 @@ func TestApply_Flux(t *testing.T) {
 	assert.Contains(t, kust, `"./crds/client"`)
 	assert.Contains(t, kust, `"prune":true`)
 	assert.Contains(t, policy, `"NetworkPolicy"`)
-	assert.Contains(t, policy, `"source-controller"`)
+	assert.Contains(t, policy, `"app":"source-controller"`)
 	assert.Contains(t, policy, `"tool-runner"`)
 	assert.Contains(t, policy, `"iterabase-system"`)
 

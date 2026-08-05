@@ -201,7 +201,10 @@ func sourceArtifactNetworkPolicyManifest(namespace, consumerNamespace string) st
 		APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy",
 		Metadata: fluxMeta{Name: "allow-tool-materializer", Namespace: namespace},
 		Spec: networkPolicySpec{
-			PodSelector: labels(map[string]string{"app.kubernetes.io/component": "source-controller"}),
+			// Flux v2.4 labels the source-controller Pod template with `app`,
+			// while app.kubernetes.io/component is only present on its Service.
+			// NetworkPolicy selects Pods, so use the workload label.
+			PodSelector: labels(map[string]string{"app": "source-controller"}),
 			PolicyTypes: []string{"Ingress"},
 			Ingress: []networkPolicyIngress{{
 				From: []networkPolicyPeer{{
