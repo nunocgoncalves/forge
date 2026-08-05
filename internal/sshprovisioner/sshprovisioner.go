@@ -609,8 +609,10 @@ func (p *SSHProvisioner) Apply(ctx context.Context, opts deployer.ApplyOpts) err
 		"--version", opts.Version,
 		"-n", opts.Namespace,
 		"--create-namespace",
-		"--wait",
 		"--timeout", "10m",
+	}
+	if !opts.NoWait {
+		args = append(args, "--wait")
 	}
 	for _, f := range opts.ValueFiles {
 		args = append(args, "-f", f)
@@ -739,6 +741,19 @@ func (p *SSHProvisioner) TransferCRDOwnership(ctx context.Context, labelSelector
 	)
 	if _, err := p.run(ctx, kubectlCmd(args...)); err != nil {
 		return fmt.Errorf("transfer CRD ownership to %s/%s: %w", namespace, release, err)
+	}
+	return nil
+}
+
+// RestartDeployment implements deployer.Deployer for the one migration seam
+// where a ConfigMap must become live before Helm can wait on its consumer.
+func (p *SSHProvisioner) RestartDeployment(ctx context.Context, labelSelector, namespace string) error {
+	selector := "-l=" + labelSelector
+	if _, err := p.run(ctx, kubectlCmd("rollout", "restart", "deployment", "-n", namespace, selector)); err != nil {
+		return fmt.Errorf("restart deployment %q in %s: %w", labelSelector, namespace, err)
+	}
+	if _, err := p.run(ctx, kubectlCmd("rollout", "status", "deployment", "-n", namespace, selector, "--timeout=5m")); err != nil {
+		return fmt.Errorf("wait for deployment %q in %s: %w", labelSelector, namespace, err)
 	}
 	return nil
 }

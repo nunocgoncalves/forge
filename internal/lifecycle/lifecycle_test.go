@@ -267,10 +267,12 @@ func TestUpgrade_NotInstalled(t *testing.T) {
 type applyCall struct {
 	release, repository, version, namespace string
 	values, valueFiles                      []string
+	noWait                                  bool
 }
 type repoCall struct{ name, url string }
 type uninstallCall struct{ release, namespace string }
 type ownershipTransferCall struct{ selector, release, namespace string }
+type restartCall struct{ selector, namespace string }
 
 // fakeDeployer is a controllable deployer.Deployer for lifecycle chart tests.
 type fakeDeployer struct {
@@ -282,6 +284,7 @@ type fakeDeployer struct {
 	applyManifestCalls       []string // captured manifests (JSON) piped via stdin
 	ownershipTransfers       []ownershipTransferCall
 	hookOwnershipTransfers   []ownershipTransferCall
+	restarts                 []restartCall
 	order                    []string // ordered op log for phase-ordering assertions
 	statusStates             map[string]deployer.ChartState
 	crdsOwnedByTarget        bool
@@ -295,7 +298,7 @@ func (f *fakeDeployer) Apply(_ context.Context, opts deployer.ApplyOpts) error {
 	f.applyCalls = append(f.applyCalls, applyCall{
 		release: opts.Release, repository: opts.Repository,
 		version: opts.Version, namespace: opts.Namespace,
-		values: opts.Values, valueFiles: opts.ValueFiles,
+		values: opts.Values, valueFiles: opts.ValueFiles, noWait: opts.NoWait,
 	})
 	f.order = append(f.order, "apply")
 	if f.applyErr != nil {
@@ -346,6 +349,11 @@ func (f *fakeDeployer) TransferCRDOwnership(_ context.Context, selector, release
 		return f.ownershipTransferErr
 	}
 	f.crdsOwnedByTarget = true
+	return nil
+}
+func (f *fakeDeployer) RestartDeployment(_ context.Context, selector, namespace string) error {
+	f.restarts = append(f.restarts, restartCall{selector, namespace})
+	f.order = append(f.order, "restart")
 	return nil
 }
 func (f *fakeDeployer) UninstallChart(_ context.Context, release, ns string) error {
@@ -457,19 +465,25 @@ func TestApply_Chart_MigratesPreSubstrateOwnershipBeforeCompanion(t *testing.T) 
 	require.NoError(t, err)
 	assert.True(t, res.CertificateSubstrateApplied)
 	assert.True(t, res.ChartApplied)
-	require.Len(t, d.applyCalls, 3)
+	require.Len(t, d.applyCalls, 4)
 	assert.Equal(t, "opo1", d.applyCalls[0].release, "old platform owner upgrades before companion install")
 	assert.Equal(t, []string{"control-plane.toolRunner.enabled=false"}, d.applyCalls[0].values)
 	assert.Equal(t, "opo1-cert-manager", d.applyCalls[1].release)
-	assert.Equal(t, "opo1", d.applyCalls[2].release, "normal values reconcile after the companion is Ready")
-	assert.Empty(t, d.applyCalls[2].values)
+	assert.Equal(t, "opo1", d.applyCalls[2].release, "final gateway config publishes without waiting on its runner")
+	assert.True(t, d.applyCalls[2].noWait)
+	assert.Equal(t, "opo1", d.applyCalls[3].release, "normal waited values reconcile after the gateway restarts")
+	assert.Empty(t, d.applyCalls[3].values)
 	require.Equal(t, []ownershipTransferCall{{
 		selector: certificateHookLabelSelector("opo1"), release: "opo1", namespace: "iterabase-system",
 	}}, d.hookOwnershipTransfers)
 	require.Equal(t, []ownershipTransferCall{{
 		selector: certificateCRDLabelSelector, release: "opo1-cert-manager", namespace: "iterabase-system",
 	}}, d.ownershipTransfers)
-	assert.Equal(t, []string{"hook-transfer", "apply", "crd-transfer", "apply", "apply"}, d.order)
+	require.Equal(t, []restartCall{{
+		selector:  "app.kubernetes.io/name=control-plane,app.kubernetes.io/instance=opo1,app.kubernetes.io/component=gateway",
+		namespace: "iterabase-system",
+	}}, d.restarts)
+	assert.Equal(t, []string{"hook-transfer", "apply", "crd-transfer", "apply", "apply", "restart", "apply"}, d.order)
 }
 
 func TestApply_Chart_ResumesOwnershipTransferAfterFailure(t *testing.T) {
@@ -500,10 +514,11 @@ func TestApply_Chart_ResumesOwnershipTransferAfterFailure(t *testing.T) {
 	assert.True(t, res.ChartApplied)
 	require.Len(t, d.ownershipTransfers, 2, "retry resumes the incomplete ownership hand-off")
 	assert.True(t, d.crdsOwnedByTarget)
-	require.Len(t, d.applyCalls, 4)
+	require.Len(t, d.applyCalls, 5)
 	assert.Equal(t, []string{"control-plane.toolRunner.enabled=false"}, d.applyCalls[1].values)
 	assert.Equal(t, "opo1-cert-manager", d.applyCalls[2].release)
-	assert.Equal(t, "opo1", d.applyCalls[3].release)
+	assert.True(t, d.applyCalls[3].noWait)
+	assert.Equal(t, "opo1", d.applyCalls[4].release)
 }
 
 func TestApply_Chart_RequiresFluxArtifactBeforeSubstrate(t *testing.T) {
