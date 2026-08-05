@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/digitalocean/godo"
-	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
 	"github.com/nunocgoncalves/forge/test/e2e/internal/runner"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
@@ -36,6 +35,12 @@ const (
 	size    = "s-2vcpu-4gb" // full stack + MetalLB needs headroom; s-1vcpu-2gb timed out on helm --wait
 	image   = "ubuntu-24-04-x64"
 	k3sPort = 6443
+
+	// The generic cloud scaffold is a local file:// overlay and intentionally
+	// predates the 0.3 exact-Flux generation contract. Keep these substrate
+	// scenarios on the last compatible chart; the 0.3+ path is covered by the
+	// dedicated tool-runner contract and OPO1 production-reference validation.
+	cloudBaselineChartVersion = "0.2.2"
 )
 
 type digitalOceanCPUState struct {
@@ -69,7 +74,7 @@ func runDigitalOceanCPU(t *testing.T) {
 	state.forgeBin = buildForge(t)
 	state.chartVersion = os.Getenv("ITERABASE_CHART_VERSION")
 	if state.chartVersion == "" {
-		state.chartVersion = kindtest.LatestChartVersion(t, "iterabase-platform")
+		state.chartVersion = cloudBaselineChartVersion
 	}
 	t.Logf("run %s (keep=%v)", state.runID, state.keep)
 	t.Cleanup(func() { state.cleanup(t) })

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/digitalocean/godo"
-	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
 	"github.com/nunocgoncalves/forge/test/e2e/internal/runner"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -164,7 +163,7 @@ func runDigitalOceanGPU(t *testing.T) {
 	}
 	state.chartVersion = os.Getenv("ITERABASE_CHART_VERSION")
 	if state.chartVersion == "" {
-		state.chartVersion = kindtest.LatestChartVersion(t, "iterabase-platform")
+		state.chartVersion = cloudBaselineChartVersion
 	}
 
 	vm, err := state.provisioner.Provision(ctx, state.runID, pubKey, privKeyPath)

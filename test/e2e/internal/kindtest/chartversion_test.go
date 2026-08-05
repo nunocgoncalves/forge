@@ -83,6 +83,21 @@ func TestCompareSemver(t *testing.T) {
 	}
 }
 
+func TestChartVersionAtLeast(t *testing.T) {
+	if !ChartVersionAtLeast("0.3.0", "0.3.0") {
+		t.Fatal("boundary version must match")
+	}
+	if !ChartVersionAtLeast("0.3.1", "0.3.0") {
+		t.Fatal("newer version must match")
+	}
+	if ChartVersionAtLeast("0.2.2", "0.3.0") {
+		t.Fatal("older version must not match")
+	}
+	if ChartVersionAtLeast("latest", "0.3.0") {
+		t.Fatal("invalid version must not match")
+	}
+}
+
 // TestLatestChartVersionPicksHighestStable guards the core selection invariant
 // at the comparator level: given a mixed tag list, the highest stable semver
 // after the chart- prefix must be selected (prereleases and non-semver tags

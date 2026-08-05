@@ -71,8 +71,9 @@ func runInferenceFlowContract(t *testing.T) {
 		svcPort        = 8080
 	)
 
-	// 1. Kind cluster.
+	// 1. Kind cluster and the platform's version-matched certificate substrate.
 	c := kindtest.CreateCluster(t, "forge-inference-e2e")
+	installPlatformCertificateSubstrate(t, c, release, chartRef, chartVersion, namespace, localChart)
 
 	if localImage := os.Getenv("ITERABASE_LOCAL_IMAGE"); localImage != "" {
 		c.LoadImage(t, localImage)
@@ -82,9 +83,10 @@ func runInferenceFlowContract(t *testing.T) {
 	//    kind; the test port-forwards the api + gateway directly). redis stays
 	//    enabled (the gateway uses it for rate-limit counters).
 	values := map[string]string{
-		"ingress-nginx.enabled":          "false",
-		"minio.enabled":                  "false",
-		"control-plane.artifact.enabled": "false",
+		"ingress-nginx.enabled":            "false",
+		"minio.enabled":                    "false",
+		"control-plane.artifact.enabled":   "false",
+		"control-plane.toolRunner.enabled": "false",
 	}
 	c.HelmInstall(t, release, chartRef, chartVersion, namespace, localChart, values)
 
