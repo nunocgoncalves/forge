@@ -560,16 +560,18 @@ func checkGatewayNodePortHealth(t *testing.T, kcPath, ip string) {
 	services, err := cs.CoreV1().Services("iterabase-system").List(context.Background(), metav1.ListOptions{
 		LabelSelector: "app.kubernetes.io/name=ingress-nginx,app.kubernetes.io/component=controller",
 	})
-	if err != nil || len(services.Items) != 1 {
-		t.Fatalf("resolve ingress controller Service: count=%d err=%v", len(services.Items), err)
+	if err != nil {
+		t.Fatalf("resolve ingress controller Services: %v", err)
 	}
-	for _, port := range services.Items[0].Spec.Ports {
-		if port.Port == 443 && port.NodePort > 0 {
-			checkGatewayHealthOnPort(t, ip, int(port.NodePort))
-			return
+	for _, service := range services.Items {
+		for _, port := range service.Spec.Ports {
+			if port.Port == 443 && port.NodePort > 0 {
+				checkGatewayHealthOnPort(t, ip, int(port.NodePort))
+				return
+			}
 		}
 	}
-	t.Fatalf("ingress controller Service has no HTTPS NodePort: %+v", services.Items[0].Spec.Ports)
+	t.Fatalf("ingress controller Services have no HTTPS NodePort: %+v", services.Items)
 }
 
 func checkGatewayHealthOnPort(t *testing.T, ip string, port int) {
