@@ -47,7 +47,7 @@ The inference path depends on GPU readiness, so a second VM/operator installatio
 - `kind-inference-contract`: umbrella cross-service catalog/auth contract.
 - `kind-cert-issuers`: minimal cert-manager/self-signed issuer values contract.
 - `kind-internal-tls`: two-phase Helm transition and live internal transport contract.
-- `kind-tool-runner-contract`: exact Flux artifact materialization through the chart-managed Node runner, mTLS gateway registration, and generation rollover using coordinated local control-plane/charts builds.
+- `kind-tool-runner-contract`: exact Flux artifact materialization through the chart-managed Node runner, mTLS gateway registration, and pinned generation drain using coordinated local control-plane/charts builds.
 
 These remain isolated because clean chart installation, cluster-scoped CRDs/issuers, hooks, and value combinations are part of what they test. Sharing a cluster could mask missing resources or leak state between releases.
 
@@ -66,7 +66,7 @@ These remain isolated because clean chart installation, cluster-scoped CRDs/issu
 | `TestInferenceFlowContract` | `kind-inference-contract` | unchanged plus restored PermissionPolicy materialization |
 | `TestCertIssuers` | `kind-cert-issuers` | unchanged, fresh Kind cluster |
 | `TestInternalTLS` | `kind-internal-tls` | unchanged, fresh Kind cluster |
-| HOR-397 cross-repository acceptance | `kind-tool-runner-contract` | Flux artifact → materializer → runner → mTLS registration → rollover |
+| HOR-397 cross-repository acceptance | `kind-tool-runner-contract` | Flux artifact → materializer → runner → mTLS registration → pinned drain |
 
 ## CI
 
