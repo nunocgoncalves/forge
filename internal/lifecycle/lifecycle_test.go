@@ -464,7 +464,7 @@ func TestApply_Chart_MigratesPreSubstrateOwnershipBeforeCompanion(t *testing.T) 
 	assert.Equal(t, "opo1", d.applyCalls[2].release, "normal values reconcile after the companion is Ready")
 	assert.Empty(t, d.applyCalls[2].values)
 	require.Equal(t, []ownershipTransferCall{{
-		selector: certificateHookLabelSelector, release: "opo1", namespace: "iterabase-system",
+		selector: certificateHookLabelSelector("opo1"), release: "opo1", namespace: "iterabase-system",
 	}}, d.hookOwnershipTransfers)
 	require.Equal(t, []ownershipTransferCall{{
 		selector: certificateCRDLabelSelector, release: "opo1-cert-manager", namespace: "iterabase-system",
