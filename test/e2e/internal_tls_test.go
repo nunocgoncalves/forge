@@ -114,9 +114,13 @@ func runInternalTLS(t *testing.T) {
 	}
 	t.Logf("gateway /readyz 200 — Postgres verify-full + Redis TLS green")
 
-	// 7. Control-plane api serves HTTPS: port-forward the api Service and GET
-	//    /healthz with a TLS client trusting the internal CA. The api cert SAN
-	//    includes localhost, so https://localhost:<port> verifies cleanly.
+	// 7. Control-plane api serves HTTPS: wait for its TLS rollout before
+	//    port-forwarding the Service so a terminating plaintext pod cannot be
+	//    selected during the no-wait Helm upgrade. Then GET /healthz with a TLS
+	//    client trusting the internal CA. The api cert SAN includes localhost,
+	//    so https://localhost:<port> verifies cleanly.
+	c.Kubectl(t, "rollout", "status", "-n", namespace,
+		"deployment/"+release+"-control-plane-api", "--timeout=300s")
 	caB64 := c.Kubectl(t, "get", "secret", release+"-internal-ca-root", "-n", namespace,
 		"-o", "jsonpath={.data.ca\\.crt}")
 	caPEM, err := base64.StdEncoding.DecodeString(strings.TrimSpace(caB64))
