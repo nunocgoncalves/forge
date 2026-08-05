@@ -634,7 +634,24 @@ func (p *SSHProvisioner) Status(ctx context.Context, release, namespace string) 
 	if err != nil {
 		return &deployer.ChartState{Installed: false}, nil // release not found
 	}
-	return parseHelmStatus(out)
+	state, err := parseHelmStatus(out)
+	if err != nil || state.Version != "" {
+		return state, err
+	}
+
+	// Helm 4 removed chart metadata from `helm status` JSON. Resolve the exact
+	// chart version through the dedicated metadata command while retaining the
+	// live release status above. Helm 3 status still takes the fast path.
+	out, err = p.run(ctx, helmCmd("get", "metadata", release, "-n", namespace, "-o", "json"))
+	if err != nil {
+		return nil, fmt.Errorf("helm get metadata: %w", err)
+	}
+	version, err := parseHelmMetadataVersion(out)
+	if err != nil {
+		return nil, err
+	}
+	state.Version = version
+	return state, nil
 }
 
 const crdOwnershipJSONPath = `{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.meta\.helm\.sh/release-name}{"\t"}{.metadata.annotations.meta\.helm\.sh/release-namespace}{"\n"}{end}`
@@ -761,6 +778,10 @@ type helmStatusJSON struct {
 	} `json:"chart"`
 }
 
+type helmMetadataJSON struct {
+	Version string `json:"version"`
+}
+
 func parseHelmStatus(out string) (*deployer.ChartState, error) {
 	var hs helmStatusJSON
 	if err := json.Unmarshal([]byte(out), &hs); err != nil {
@@ -771,4 +792,15 @@ func parseHelmStatus(out string) (*deployer.ChartState, error) {
 		Status:    hs.Info.Status,
 		Version:   hs.Chart.Metadata.Version,
 	}, nil
+}
+
+func parseHelmMetadataVersion(out string) (string, error) {
+	var metadata helmMetadataJSON
+	if err := json.Unmarshal([]byte(out), &metadata); err != nil {
+		return "", fmt.Errorf("parse helm metadata: %w", err)
+	}
+	if metadata.Version == "" {
+		return "", fmt.Errorf("parse helm metadata: chart version is empty")
+	}
+	return metadata.Version, nil
 }
