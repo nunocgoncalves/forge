@@ -677,6 +677,52 @@ func (p *SSHProvisioner) CRDOwnedBy(ctx context.Context, labelSelector, release,
 	return true, nil
 }
 
+// CRDsAnnotated implements deployer.Deployer from live CRD metadata.
+func (p *SSHProvisioner) CRDsAnnotated(ctx context.Context, labelSelector, annotation, value string) (bool, error) {
+	out, err := p.run(ctx, kubectlCmd("get", "crd", "-l", labelSelector, "-o", "json"))
+	if err != nil {
+		return false, fmt.Errorf("read CRD annotations: %w", err)
+	}
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Annotations map[string]string `json:"annotations"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		return false, fmt.Errorf("decode CRD annotations: %w", err)
+	}
+	if len(list.Items) == 0 {
+		return false, nil
+	}
+	for _, item := range list.Items {
+		if item.Metadata.Annotations[annotation] != value {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// AnnotateCRDs implements deployer.Deployer with one idempotent kubectl
+// annotation operation over the selected CRDs.
+func (p *SSHProvisioner) AnnotateCRDs(ctx context.Context, labelSelector, annotation, value string) error {
+	out, err := p.run(ctx, kubectlCmd("get", "crd", "-l", labelSelector, "-o", "name"))
+	if err != nil {
+		return fmt.Errorf("list CRDs for annotation: %w", err)
+	}
+	resources := strings.Fields(out)
+	if len(resources) == 0 {
+		return fmt.Errorf("no CRDs match annotation selector %q", labelSelector)
+	}
+	args := append([]string{"annotate", "--overwrite"}, resources...)
+	args = append(args, annotation+"="+value)
+	if _, err := p.run(ctx, kubectlCmd(args...)); err != nil {
+		return fmt.Errorf("annotate CRDs: %w", err)
+	}
+	return nil
+}
+
 // TransferCertificateHookOwnership implements deployer.Deployer. Platform 0.2
 // created ClusterIssuers and internal-CA Certificates as Helm hooks, so Helm did
 // not attach release annotations. Platform 0.3 renders them as normal resources;

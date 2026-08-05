@@ -819,6 +819,43 @@ func TestDeployer_CRDOwnedBy(t *testing.T) {
 	}
 }
 
+func TestDeployer_CRDsAnnotated(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		if strings.Contains(cmd, "'get' 'crd'") && strings.Contains(cmd, "'-o' 'json'") {
+			return `{"items":[{"metadata":{"annotations":{"forge.horizonshift.io/certificate-substrate-migration":"0.3.0"}}},{"metadata":{"annotations":{"forge.horizonshift.io/certificate-substrate-migration":"0.3.0"}}}]}`, 0
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	complete, err := p.CRDsAnnotated(context.Background(), "app.kubernetes.io/name=cert-manager",
+		"forge.horizonshift.io/certificate-substrate-migration", "0.3.0")
+	require.NoError(t, err)
+	assert.True(t, complete)
+}
+
+func TestDeployer_AnnotateCRDs(t *testing.T) {
+	var annotate string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case strings.Contains(cmd, "'get' 'crd'"):
+			return "customresourcedefinition.apiextensions.k8s.io/certificates.cert-manager.io\n", 0
+		case strings.Contains(cmd, "'annotate' '--overwrite'"):
+			annotate = cmd
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.AnnotateCRDs(context.Background(), "app.kubernetes.io/name=cert-manager",
+		"forge.horizonshift.io/certificate-substrate-migration", "0.3.0"))
+	assert.Contains(t, annotate, "'forge.horizonshift.io/certificate-substrate-migration=0.3.0'")
+}
+
 func TestDeployer_TransferCertificateHookOwnership(t *testing.T) {
 	var annotations []string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
