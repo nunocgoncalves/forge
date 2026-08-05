@@ -10,8 +10,8 @@ import (
 	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
 )
 
-// runCertIssuers deploys the iterabase-platform umbrella with cert-manager +
-// the cert-issuers subchart (self-signed ClusterIssuer) to a local Kind cluster,
+// runCertIssuers deploys the platform's version-matched certificate substrate
+// plus the cert-issuers subchart (self-signed ClusterIssuer) to a local Kind cluster,
 // simulates the forge secret-sync (applies a dummy cloudflare token Secret in
 // the cert-manager controller namespace), and asserts the self-signed
 // ClusterIssuer reaches Ready. These are intentionally two adjacent boundary
@@ -20,8 +20,8 @@ import (
 // scenario proves forge's env→SSH-stdin→Secret transport without real credentials.
 //
 // The umbrella chart is published at
-// oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform with its
-// dependencies (cert-manager + cert-issuers) baked in. By default the chart
+// oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform. Platform
+// 0.3+ publishes cert-manager-substrate at the same version. By default the chart
 // version is auto-resolved to the latest stable release; override via env for
 // local dev/pinning: ITERABASE_PLATFORM_LOCAL_CHART points at a checkout (helm
 // installs the path directly), ITERABASE_CHART_VERSION pins a specific release.
@@ -38,11 +38,10 @@ func runCertIssuers(t *testing.T) {
 	// 1. Kind cluster.
 	c := kindtest.CreateCluster(t, "forge-cert-issuers-e2e")
 
-	// 2. helm install. Install ONLY cert-manager + cert-issuers (disable the
-	//    rest) to keep the kind install lean. The umbrella defaults have
-	//    cert-manager + cert-issuers (self-signed) enabled; the LE issuer stays
-	//    off (no real Cloudflare). The ClusterIssuer is a post-install hook, so
-	//    helm --wait (cert-manager Ready) precedes its creation.
+	// 2. Install the versioned substrate, then ONLY cert-issuers from the
+	//    platform chart (disable the rest) to keep the Kind install lean. The LE
+	//    issuer stays off (no real Cloudflare).
+	installPlatformCertificateSubstrate(t, c, "iterabase", chartRef, chartVersion, namespace, localChart)
 	values := map[string]string{
 		"inference-gateway.enabled": "false",
 		"control-plane.enabled":     "false",
@@ -50,7 +49,6 @@ func runCertIssuers(t *testing.T) {
 		"minio.enabled":             "false",
 		"ingress-nginx.enabled":     "false",
 		"agent-fleet.enabled":       "false",
-		"cert-manager.enabled":      "true",
 		"cert-issuers.enabled":      "true",
 	}
 	c.HelmInstall(t, "iterabase", chartRef, chartVersion, namespace, localChart, values)

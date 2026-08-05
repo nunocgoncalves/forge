@@ -56,16 +56,18 @@ func runInternalTLS(t *testing.T) {
 	// — not needed to prove internal TLS, and they'd need a MetalLB pool on kind.
 	// Keep control-plane + Postgres + Redis + gateway + cert-manager + cert-issuers.
 	edgeOff := map[string]string{
-		"ingress-nginx.enabled":          "false",
-		"metallb.enabled":                "false",
-		"metallb-config.enabled":         "false",
-		"external-dns.enabled":           "false",
-		"minio.enabled":                  "false",
-		"control-plane.artifact.enabled": "false",
+		"ingress-nginx.enabled":            "false",
+		"metallb.enabled":                  "false",
+		"metallb-config.enabled":           "false",
+		"external-dns.enabled":             "false",
+		"minio.enabled":                    "false",
+		"control-plane.artifact.enabled":   "false",
+		"control-plane.toolRunner.enabled": "false",
 	}
 
-	// 1. Kind cluster.
+	// 1. Kind cluster and the platform's version-matched certificate substrate.
 	c := kindtest.CreateCluster(t, "forge-internal-tls-e2e")
+	installPlatformCertificateSubstrate(t, c, release, chartRef, chartVersion, namespace, localChart)
 
 	// 2. Phase 1: install plaintext (--wait brings cert-manager Ready + all
 	//    components up over plain TCP — no certs needed yet).

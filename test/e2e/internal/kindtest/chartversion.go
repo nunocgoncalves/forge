@@ -180,6 +180,13 @@ func looksSemver(v string) bool {
 	return true
 }
 
+// ChartVersionAtLeast reports whether version is a valid chart SemVer at or
+// above boundary. It shares the release resolver's comparison rules so E2E
+// setup can follow versioned chart substrate boundaries without string checks.
+func ChartVersionAtLeast(version, boundary string) bool {
+	return looksSemver(version) && looksSemver(boundary) && compareSemver(version, boundary) >= 0
+}
+
 // compareSemver compares two semver strings (optional leading "v", optional
 // -prerelease/+build). Returns -1, 0, or 1. A version without a prerelease ranks
 // higher than one with a prerelease at the same MAJOR.MINOR.PATCH; prereleases
