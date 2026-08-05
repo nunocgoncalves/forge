@@ -11,8 +11,8 @@ const (
 	// PR-gating tests use explicit released baselines when no coordinated ticket
 	// branches are available. Upgrades are intentional changes to this file, not
 	// an unrelated release silently changing another PR's test matrix.
-	pinnedPlatformChartVersion     = "0.3.0"
-	pinnedControlPlaneChartVersion = "0.4.0"
+	pinnedPlatformChartVersion     = "0.3.1"
+	pinnedControlPlaneChartVersion = "0.4.1"
 
 	// The CPU cloud scenario starts here only to prove the real ownership handoff
 	// into pinnedPlatformChartVersion. It is not the scenario's desired version.
