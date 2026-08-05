@@ -517,10 +517,12 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 
 func applyPlatformChartPhase(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string, migrated bool) error {
 	if migrated {
-		// The migration's guarded platform apply intentionally omitted the runner,
-		// so the existing gateway Pod loaded no approved runner identity. Publish
-		// the final ConfigMap without waiting, restart only that gateway, then let
-		// the normal waited Helm reconcile below gate on runner registration.
+		// Routine gateway config changes roll through the chart's pod-template
+		// checksum. The migration still stages an explicit restart because its
+		// guarded platform apply intentionally omitted the runner, so the existing
+		// gateway Pod loaded no approved runner identity. Publish the final ConfigMap
+		// without waiting, restart only that gateway, then let the normal waited Helm
+		// reconcile below gate on runner registration.
 		if err := applyChartWithWait(ctx, cfg, d, opts, res, overlayDest, true); err != nil {
 			return err
 		}
