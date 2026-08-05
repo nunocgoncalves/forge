@@ -77,6 +77,7 @@ jobs:
 
   kind:
     name: kind-${{ matrix.name }}
+    if: github.event_name != 'schedule'
     needs: harness
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout }}
@@ -105,31 +106,43 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: resolve coordinated ticket branches
-        if: matrix.name == 'tool-runner-contract'
         id: coordinated-refs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ticket=$(printf '%s' "${GITHUB_HEAD_REF:-}" | grep -oE '^HOR-[0-9]+' || true)
           resolve_ref() {
-            local repository=$1 ref=""
+            local repository=$1
             if [ -n "$ticket" ]; then
-              ref=$(gh api --paginate "repos/$repository/branches?per_page=100" \
-                --jq ".[] | select(.name | startswith(\"${ticket}-\")) | .name" | head -1)
+              gh api --paginate "repos/$repository/branches?per_page=100" \
+                --jq ".[] | select(.name | startswith(\"${ticket}-\")) | .name" | head -1
             fi
-            printf '%s' "${ref:-master}"
           }
-          echo "control_plane_ref=$(resolve_ref nunocgoncalves/control-plane)" >> "$GITHUB_OUTPUT"
-          echo "charts_ref=$(resolve_ref nunocgoncalves/iterabase-charts)" >> "$GITHUB_OUTPUT"
+          control_plane_ref=$(resolve_ref nunocgoncalves/control-plane)
+          charts_ref=$(resolve_ref nunocgoncalves/iterabase-charts)
+          if [ -n "$control_plane_ref" ] && [ -n "$charts_ref" ]; then
+            {
+              echo "mode=source-composed"
+              echo "control_plane_ref=$control_plane_ref"
+              echo "charts_ref=$charts_ref"
+              echo "control_plane_root=$GITHUB_WORKSPACE/dependencies/control-plane"
+              echo "charts_root=$GITHUB_WORKSPACE/dependencies/iterabase-charts"
+              echo "platform_local_chart=$GITHUB_WORKSPACE/dependencies/iterabase-charts/charts/iterabase-platform"
+              echo "control_plane_local_chart=$GITHUB_WORKSPACE/dependencies/iterabase-charts/charts/control-plane"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=pinned-release" >> "$GITHUB_OUTPUT"
+            echo "No complete coordinated branch pair for ${ticket:-non-ticket run}; using reviewed pinned releases."
+          fi
       - name: checkout coordinated control-plane source
-        if: matrix.name == 'tool-runner-contract'
+        if: steps.coordinated-refs.outputs.mode == 'source-composed'
         uses: actions/checkout@v7
         with:
           repository: nunocgoncalves/control-plane
           ref: ${{ steps.coordinated-refs.outputs.control_plane_ref }}
           path: dependencies/control-plane
       - name: checkout coordinated chart source
-        if: matrix.name == 'tool-runner-contract'
+        if: steps.coordinated-refs.outputs.mode == 'source-composed'
         uses: actions/checkout@v7
         with:
           repository: nunocgoncalves/iterabase-charts
@@ -146,9 +159,67 @@ jobs:
           sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
           curl -sSL -o /tmp/kubectl "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
-      - name: run ${{ matrix.name }}
+      - name: build coordinated chart dependencies
+        if: steps.coordinated-refs.outputs.mode == 'source-composed' && matrix.name != 'tool-runner-contract'
+        run: |
+          helm dependency build dependencies/iterabase-charts/charts/control-plane
+          if [ "${{ matrix.name }}" != "controlplane-identity" ]; then
+            helm dependency build dependencies/iterabase-charts/charts/cert-manager-substrate
+            helm dependency build dependencies/iterabase-charts/charts/iterabase-platform
+          fi
+      - name: run ${{ matrix.name }} (${{ steps.coordinated-refs.outputs.mode }})
         run: make ${{ matrix.target }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ITERABASE_CONTROL_PLANE_ROOT: ${{ github.workspace }}/dependencies/control-plane
-          ITERABASE_CHARTS_ROOT: ${{ github.workspace }}/dependencies/iterabase-charts
+          ITERABASE_CONTROL_PLANE_ROOT: ${{ matrix.name == 'tool-runner-contract' && steps.coordinated-refs.outputs.control_plane_root || '' }}
+          ITERABASE_CHARTS_ROOT: ${{ matrix.name == 'tool-runner-contract' && steps.coordinated-refs.outputs.charts_root || '' }}
+          ITERABASE_LOCAL_CHART: ${{ steps.coordinated-refs.outputs.platform_local_chart }}
+          ITERABASE_PLATFORM_LOCAL_CHART: ${{ steps.coordinated-refs.outputs.platform_local_chart }}
+          CONTROL_PLANE_LOCAL_CHART: ${{ steps.coordinated-refs.outputs.control_plane_local_chart }}
+
+  published-compatibility:
+    name: published-latest-${{ matrix.name }}
+    if: github.event_name == 'schedule'
+    needs: harness
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: controlplane-identity
+            target: test-e2e-controlplane
+            timeout: 20
+          - name: inference-contract
+            target: test-e2e-inference
+            timeout: 20
+          - name: cert-issuers
+            target: test-e2e-cert-issuers
+            timeout: 20
+          - name: internal-tls
+            target: test-e2e-internal-tls
+            timeout: 25
+          - name: tool-runner-contract
+            target: test-e2e-tool-runner
+            timeout: 35
+    concurrency:
+      group: e2e-published-latest-${{ matrix.name }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+      - name: install kind, helm, and kubectl
+        run: |
+          curl -sSL -o /tmp/kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+          curl -sSL https://get.helm.sh/helm-v3.18.0-linux-amd64.tar.gz | tar -xz -C /tmp
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          curl -sSL -o /tmp/kubectl "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+      - name: run ${{ matrix.name }} against latest published artifacts
+        run: make ${{ matrix.target }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORGE_E2E_USE_LATEST_RELEASE: "true"

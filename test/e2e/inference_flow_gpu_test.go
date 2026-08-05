@@ -38,7 +38,8 @@ func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 	// with the platform chart while skipping a redundant GPU-operator upgrade.
 	cfgPath := writeForgeConfigInferenceGPU(t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion)
 	out := applyWithRetryArgs(t, state.forgeBin, state.forgeHome, cfgPath, "--skip-gpu")
-	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "chart applied: true")
+	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
+		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True")
 	t.Logf("apply output:\n%s", out)
 }
 
@@ -176,12 +177,15 @@ spec:
 	t.Logf("real completion (%s): %q", alias, preview)
 }
 
-// writeForgeConfigInferenceGPU writes a forge.yaml for the inference GPU e2e:
-// single-node k3s + GPU operator + the iterabase-platform umbrella chart.
+// writeForgeConfigInferenceGPU writes the current production-ordered GPU
+// fixture: exact public Flux source, certificate substrate, then platform.
 func writeForgeConfigInferenceGPU(t *testing.T, name, ip, keyPath, chartVersion string) string {
 	return writeForgeConfigSpec(t, forgeConfigSpec{
 		Name: name, Address: ip, SSHKeyPath: keyPath, GPU: true,
 		ChartVersion: chartVersion, ChartRelease: "itb", ChartNamespace: "iterabase-system",
+		OverlayRepo: "https://github.com/nunocgoncalves/iterabase-overlay.git",
+		OverlayRef:  envOr("FORGE_E2E_OVERLAY_REF", "HOR-397-forge-e2e-tool-fixture"),
+		Flux:        true,
 	})
 }
 

@@ -33,10 +33,10 @@ import (
 //
 // The control-plane chart (HOR-316) is published at
 // oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane with its pgvector
-// Postgres dependency baked in. By default the chart version is auto-resolved
-// from the charts repo's latest stable GitHub release and the image tag is
-// derived from the chart's appVersion, so CI is never silently pinned to an old
-// control-plane and the image can't drift from the chart (HOR-321). Override via
+// Postgres dependency baked in. PR tests use coordinated chart source when
+// available and the reviewed pinned release otherwise; the scheduled
+// compatibility matrix opts into latest stable. The image tag is derived from
+// chart appVersion, so chart and image cannot drift. Override via
 // env for local dev / pinning: CONTROL_PLANE_LOCAL_CHART points at a checkout
 // (helm installs the path directly), CONTROL_PLANE_LOCAL_IMAGE loads a
 // locally-built image into the Kind nodes, and CONTROL_PLANE_CHART_VERSION /
@@ -47,13 +47,9 @@ func runControlPlaneIdentity(t *testing.T) {
 	localChart := os.Getenv("CONTROL_PLANE_LOCAL_CHART") // optional local path for dev
 	imageRepo := envOr("CONTROL_PLANE_IMAGE_REPO", "ghcr.io/nunocgoncalves/control-plane")
 
-	// chartVersion: explicit pin wins; otherwise auto-resolve the latest stable
-	// release from the charts repo's GitHub releases (HOR-321). Skipped for
-	// local-chart dev — helm installs the path directly, so no version is needed.
-	chartVersion := os.Getenv("CONTROL_PLANE_CHART_VERSION")
-	if chartVersion == "" && localChart == "" {
-		chartVersion = kindtest.LatestChartVersion(t, "control-plane")
-	}
+	// Explicit env pins and coordinated local source win over the reviewed
+	// fallback. Latest stable is reserved for the scheduled compatibility mode.
+	chartVersion := controlPlaneChartVersion(t, localChart)
 
 	// imageTag: explicit pin wins; otherwise derive it from the chart's
 	// appVersion so the deployed image can never drift from the chart (the
