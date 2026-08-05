@@ -540,9 +540,15 @@ func applyPlatformChartPhase(ctx context.Context, cfg *config.Cluster, d deploye
 	if err != nil || !requiresSubstrate {
 		return err
 	}
-	if err := d.AnnotateCRDs(ctx, certificateCRDLabelSelector, certificateMigrationAnnotation, certificateMigrationComplete); err != nil {
-		auditFail(cfg, "mark-certificate-migration-complete", err)
-		return fmt.Errorf("mark certificate migration complete: %w", err)
+	complete, err := d.CRDsAnnotated(ctx, certificateCRDLabelSelector, certificateMigrationAnnotation, certificateMigrationComplete)
+	if err != nil {
+		return fmt.Errorf("read certificate migration completion state: %w", err)
+	}
+	if !complete {
+		if err := d.AnnotateCRDs(ctx, certificateCRDLabelSelector, certificateMigrationAnnotation, certificateMigrationComplete); err != nil {
+			auditFail(cfg, "mark-certificate-migration-complete", err)
+			return fmt.Errorf("mark certificate migration complete: %w", err)
+		}
 	}
 	return nil
 }
