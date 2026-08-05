@@ -709,6 +709,8 @@ func (p *SSHProvisioner) TransferCertificateHookOwnership(ctx context.Context, l
 		args = append(args,
 			"meta.helm.sh/release-name="+release,
 			"meta.helm.sh/release-namespace="+namespace,
+			"helm.sh/hook-",
+			"helm.sh/hook-weight-",
 		)
 		if _, err := p.run(ctx, kubectlCmd(args...)); err != nil {
 			return fmt.Errorf("transfer %s ownership to %s/%s: %w", selection.kind, namespace, release, err)

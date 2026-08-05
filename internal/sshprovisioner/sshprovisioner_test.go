@@ -811,7 +811,7 @@ func TestDeployer_TransferCertificateHookOwnership(t *testing.T) {
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
 	require.NoError(t, p.TransferCertificateHookOwnership(context.Background(),
-		"app.kubernetes.io/name=cert-issuers", "opo1", "iterabase-system"))
+		"app.kubernetes.io/instance=opo1,app.kubernetes.io/managed-by=Helm", "opo1", "iterabase-system"))
 	require.Len(t, annotations, 2)
 	assert.Contains(t, annotations[0], "'clusterissuer.cert-manager.io/selfsigned'")
 	assert.NotContains(t, annotations[0], "'-n'")
@@ -820,6 +820,8 @@ func TestDeployer_TransferCertificateHookOwnership(t *testing.T) {
 	for _, annotate := range annotations {
 		assert.Contains(t, annotate, "'meta.helm.sh/release-name=opo1'")
 		assert.Contains(t, annotate, "'meta.helm.sh/release-namespace=iterabase-system'")
+		assert.Contains(t, annotate, "'helm.sh/hook-'")
+		assert.Contains(t, annotate, "'helm.sh/hook-weight-'")
 	}
 }
 
