@@ -675,6 +675,48 @@ func (p *SSHProvisioner) CRDOwnedBy(ctx context.Context, labelSelector, release,
 	return true, nil
 }
 
+// TransferCertificateHookOwnership implements deployer.Deployer. Platform 0.2
+// created ClusterIssuers and internal-CA Certificates as Helm hooks, so Helm did
+// not attach release annotations. Platform 0.3 renders them as normal resources;
+// annotate the existing objects before upgrade so Helm adopts them in place.
+func (p *SSHProvisioner) TransferCertificateHookOwnership(ctx context.Context, labelSelector, release, namespace string) error {
+	selections := []struct {
+		kind      string
+		namespace string
+	}{
+		{kind: "clusterissuer"},
+		{kind: "certificate", namespace: namespace},
+	}
+	for _, selection := range selections {
+		getArgs := []string{"get", selection.kind}
+		if selection.namespace != "" {
+			getArgs = append(getArgs, "-n", selection.namespace)
+		}
+		getArgs = append(getArgs, "-l", labelSelector, "-o", "name")
+		out, err := p.run(ctx, kubectlCmd(getArgs...))
+		if err != nil {
+			return fmt.Errorf("list %s resources for ownership transfer: %w", selection.kind, err)
+		}
+		resources := strings.Fields(out)
+		if len(resources) == 0 {
+			continue
+		}
+		args := []string{"annotate", "--overwrite"}
+		if selection.namespace != "" {
+			args = append(args, "-n", selection.namespace)
+		}
+		args = append(args, resources...)
+		args = append(args,
+			"meta.helm.sh/release-name="+release,
+			"meta.helm.sh/release-namespace="+namespace,
+		)
+		if _, err := p.run(ctx, kubectlCmd(args...)); err != nil {
+			return fmt.Errorf("transfer %s ownership to %s/%s: %w", selection.kind, namespace, release, err)
+		}
+	}
+	return nil
+}
+
 // TransferCRDOwnership implements deployer.Deployer. Kept CRDs survive the old
 // platform release's upgrade, but retain its Helm ownership annotations. Move
 // only those metadata fields so the companion chart can adopt the same objects

@@ -45,6 +45,10 @@ type Deployer interface {
 	// CRDOwnedBy reports whether every CRD selected by label carries the given
 	// Helm release ownership annotations. An empty selection reports false.
 	CRDOwnedBy(ctx context.Context, labelSelector, release, namespace string) (bool, error)
+	// TransferCertificateHookOwnership annotates the certificate resources that
+	// platform 0.2.x created as unowned Helm hooks so the 0.3 platform release can
+	// adopt them during upgrade without deleting issuers, roots, or leaf Secrets.
+	TransferCertificateHookOwnership(ctx context.Context, labelSelector, release, namespace string) error
 	// TransferCRDOwnership annotates CRDs selected by label for adoption by a
 	// different Helm release. Used only for the platform 0.2.x -> 0.3 substrate
 	// ownership hand-off; CRD contents and custom resources are left untouched.

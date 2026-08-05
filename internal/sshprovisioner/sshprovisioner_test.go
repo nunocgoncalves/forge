@@ -792,6 +792,37 @@ func TestDeployer_CRDOwnedBy(t *testing.T) {
 	}
 }
 
+func TestDeployer_TransferCertificateHookOwnership(t *testing.T) {
+	var annotations []string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case strings.Contains(cmd, "'get' 'clusterissuer'"):
+			return "clusterissuer.cert-manager.io/selfsigned\nclusterissuer.cert-manager.io/internal-ca\n", 0
+		case strings.Contains(cmd, "'get' 'certificate'"):
+			return "certificate.cert-manager.io/opo1-internal-ca-root\n", 0
+		case strings.Contains(cmd, "'annotate' '--overwrite'"):
+			annotations = append(annotations, cmd)
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.TransferCertificateHookOwnership(context.Background(),
+		"app.kubernetes.io/name=cert-issuers", "opo1", "iterabase-system"))
+	require.Len(t, annotations, 2)
+	assert.Contains(t, annotations[0], "'clusterissuer.cert-manager.io/selfsigned'")
+	assert.NotContains(t, annotations[0], "'-n'")
+	assert.Contains(t, annotations[1], "'-n' 'iterabase-system'")
+	assert.Contains(t, annotations[1], "'certificate.cert-manager.io/opo1-internal-ca-root'")
+	for _, annotate := range annotations {
+		assert.Contains(t, annotate, "'meta.helm.sh/release-name=opo1'")
+		assert.Contains(t, annotate, "'meta.helm.sh/release-namespace=iterabase-system'")
+	}
+}
+
 func TestDeployer_TransferCRDOwnership(t *testing.T) {
 	var annotate string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {

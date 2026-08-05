@@ -254,6 +254,7 @@ const (
 	certificateSubstrateChart        = "cert-manager-substrate"
 	certificateSubstrateFirstVersion = "0.3.0"
 	certificateCRDLabelSelector      = "app.kubernetes.io/name=cert-manager"
+	certificateHookLabelSelector     = "app.kubernetes.io/name=cert-issuers"
 	fluxArtifactFirstVersion         = "0.3.0"
 )
 
@@ -396,10 +397,17 @@ func migrateCertificateOwnership(ctx context.Context, cfg *config.Cluster, d dep
 	if err != nil || !migration {
 		return err
 	}
+	ch := cfg.Spec.Chart
+	// The old cert-issuers subchart created ClusterIssuers and internal CA
+	// Certificates as unowned Helm hooks. Adopt them into the unchanged platform
+	// release before 0.3 renders them as normal resources.
+	if err := d.TransferCertificateHookOwnership(ctx, certificateHookLabelSelector, ch.Release, ch.Namespace); err != nil {
+		auditFail(cfg, "migrate-certificate-hook-ownership", err)
+		return fmt.Errorf("certificate hook ownership migration: %w", err)
+	}
 	if err := applyChart(ctx, cfg, d, opts, res, overlayDest, "control-plane.toolRunner.enabled=false"); err != nil {
 		return err
 	}
-	ch := cfg.Spec.Chart
 	if err := d.TransferCRDOwnership(ctx, certificateCRDLabelSelector, certificateSubstrateRelease(ch.Release), ch.Namespace); err != nil {
 		auditFail(cfg, "migrate-certificate-substrate-ownership", err)
 		return fmt.Errorf("certificate substrate ownership migration: %w", err)
