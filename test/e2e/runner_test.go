@@ -16,5 +16,6 @@ func TestE2E(t *testing.T) {
 		runner.Scenario{Name: "kind-inference-contract", Run: runInferenceFlowContract},
 		runner.Scenario{Name: "kind-cert-issuers", Run: runCertIssuers},
 		runner.Scenario{Name: "kind-internal-tls", Run: runInternalTLS},
+		runner.Scenario{Name: "kind-tool-runner-contract", Run: runToolRunnerContract},
 	)
 }
