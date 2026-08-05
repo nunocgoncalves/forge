@@ -11,8 +11,8 @@ import (
 )
 
 // runFluxStage exercises the Flux GitOps phase on the composed CPU fixture:
-// droplet: forge installs Flux (flux install), applies a GitRepository +
-// Kustomization pointing at the PUBLIC iterabase-overlay base repo (tokenless),
+// droplet: forge reconciles Flux, its GitRepository, and Kustomization against
+// the PUBLIC exact-artifact E2E overlay fixture (tokenless),
 // and Flux source-controller materializes the fork in-cluster + kustomize-controller
 // reconciles crds/client. Validates the MECHANICS (install → sync resources →
 // Flux reconciles) rather than a writable push-to-git loop (that's Flux upstream
@@ -113,7 +113,7 @@ func writeFluxForgeConfig(t *testing.T, name, ip, keyPath, chartVersion string) 
 		Name: name, Address: ip, SSHKeyPath: keyPath, RunLabel: true, DualStack: true,
 		ChartVersion: chartVersion,
 		OverlayRepo:  "https://github.com/nunocgoncalves/iterabase-overlay.git",
-		OverlayRef:   "master",
+		OverlayRef:   envOr("FORGE_E2E_OVERLAY_REF", "HOR-397-forge-e2e-tool-fixture"),
 		Flux:         true,
 	})
 }

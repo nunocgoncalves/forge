@@ -34,9 +34,7 @@ const fluxInstallManifest = "https://github.com/fluxcd/flux2/releases/download/v
 // shared kindtest harness rather than retaining a ticket-specific shell runner
 // in the control-plane repository.
 func runToolRunnerContract(t *testing.T) {
-	controlPlaneRoot, chartsRoot := toolRunnerDependencyRoots(t)
-	controlChart := filepath.Join(chartsRoot, "charts", "control-plane")
-	certificateChart := filepath.Join(chartsRoot, "charts", "cert-manager-substrate")
+	artifacts := resolveToolRunnerArtifacts(t)
 
 	const (
 		controlImage = "forge-tool-contract-control-plane:dev"
@@ -48,13 +46,18 @@ func runToolRunnerContract(t *testing.T) {
 
 	v1 := writeToolRevision(t, "1.0.0", "v1")
 	v2 := writeToolRevision(t, "2.0.0", "v2")
-	buildToolContractImages(t, controlPlaneRoot, controlImage, runnerImage, gitImage)
-	command(t, "helm", "dependency", "build", controlChart)
-	command(t, "helm", "dependency", "build", certificateChart)
+	buildToolGitImage(t, gitImage)
+	if artifacts.sourceComposed {
+		buildToolRunnerImages(t, artifacts.controlPlaneRoot, controlImage, runnerImage)
+		command(t, "helm", "dependency", "build", artifacts.controlChartLocal)
+		command(t, "helm", "dependency", "build", artifacts.certificateChartLocal)
+	}
 
 	cluster := kindtest.CreateCluster(t, "forge-tool-runner-contract")
-	cluster.LoadImage(t, controlImage)
-	cluster.LoadImage(t, runnerImage)
+	if artifacts.sourceComposed {
+		cluster.LoadImage(t, controlImage)
+		cluster.LoadImage(t, runnerImage)
+	}
 	cluster.LoadImage(t, gitImage)
 
 	// Install the same Flux version Forge pins, then seed an in-cluster reviewed
@@ -108,23 +111,28 @@ spec:
 	// Use the chart-owned certificate substrate and tool-runner deployment. The
 	// control-plane chart is installed without --wait because runner readiness is
 	// intentionally gated on materializing and registering the first generation.
-	cluster.HelmInstall(t, "tool-cert-manager", certificateChart, "", namespace, certificateChart, map[string]string{
-		"cert-manager.prometheus.servicemonitor.enabled": "false",
-	})
-	cluster.HelmUpgrade(t, release, controlChart, "", namespace, controlChart, map[string]string{
+	cluster.HelmInstall(t, "tool-cert-manager", artifacts.certificateChartRef, artifacts.certificateChartVersion,
+		namespace, artifacts.certificateChartLocal, map[string]string{
+			"cert-manager.prometheus.servicemonitor.enabled": "false",
+		})
+	controlValues := map[string]string{
 		"postgresql.enabled":                   "true",
-		"image.repository":                     "forge-tool-contract-control-plane",
-		"image.tag":                            "dev",
-		"image.pullPolicy":                     "Never",
 		"gateway.enabled":                      "true",
 		"gateway.tls.clusterResourceNamespace": namespace,
 		"artifact.enabled":                     "false",
 		"toolRunner.enabled":                   "true",
-		"toolRunner.image.repository":          "forge-tool-contract-runner",
-		"toolRunner.image.tag":                 "dev",
-		"toolRunner.image.pullPolicy":          "Never",
 		"toolRunner.allowedToolNamespaces":     "{platform}",
-	})
+	}
+	if artifacts.sourceComposed {
+		controlValues["image.repository"] = "forge-tool-contract-control-plane"
+		controlValues["image.tag"] = "dev"
+		controlValues["image.pullPolicy"] = "Never"
+		controlValues["toolRunner.image.repository"] = "forge-tool-contract-runner"
+		controlValues["toolRunner.image.tag"] = "dev"
+		controlValues["toolRunner.image.pullPolicy"] = "Never"
+	}
+	cluster.HelmUpgrade(t, release, artifacts.controlChartRef, artifacts.controlChartVersion,
+		namespace, artifacts.controlChartLocal, controlValues)
 	cluster.Kubectl(t, "wait", "-n", namespace, "--for=condition=Ready", "certificate/tool-tool-runner", "--timeout=180s")
 	for _, workload := range []string{"deployment/tool-control-plane-api", "deployment/tool-control-plane-gateway"} {
 		cluster.Kubectl(t, "rollout", "status", "-n", namespace, workload, "--timeout=300s")
@@ -219,34 +227,57 @@ export async function invoke(_context,args){return {result:{generation:%q,args}}
 	return toolRevision{root: root, bundlePath: bundlePath, manifestPath: manifestPath, digest: digest}
 }
 
-func toolRunnerDependencyRoots(t *testing.T) (string, string) {
-	t.Helper()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("get working directory: %v", err)
-	}
-	forgeRoot := filepath.Clean(filepath.Join(wd, "..", ".."))
-	workspace := filepath.Dir(forgeRoot)
-	controlPlane := os.Getenv("ITERABASE_CONTROL_PLANE_ROOT")
-	if controlPlane == "" {
-		controlPlane = filepath.Join(workspace, "control-plane")
-	}
-	charts := os.Getenv("ITERABASE_CHARTS_ROOT")
-	if charts == "" {
-		charts = filepath.Join(workspace, "iterabase-charts")
-	}
-	for label, path := range map[string]string{"control-plane": controlPlane, "iterabase-charts": charts} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("%s checkout %q unavailable (set the corresponding ITERABASE_*_ROOT): %v", label, path, err)
-		}
-	}
-	return controlPlane, charts
+type toolRunnerArtifacts struct {
+	sourceComposed          bool
+	controlPlaneRoot        string
+	controlChartRef         string
+	controlChartVersion     string
+	controlChartLocal       string
+	certificateChartRef     string
+	certificateChartVersion string
+	certificateChartLocal   string
 }
 
-func buildToolContractImages(t *testing.T, controlPlaneRoot, controlImage, runnerImage, gitImage string) {
+func resolveToolRunnerArtifacts(t *testing.T) toolRunnerArtifacts {
+	t.Helper()
+	controlPlaneRoot := os.Getenv("ITERABASE_CONTROL_PLANE_ROOT")
+	chartsRoot := os.Getenv("ITERABASE_CHARTS_ROOT")
+	if (controlPlaneRoot == "") != (chartsRoot == "") {
+		t.Fatal("source composition requires both ITERABASE_CONTROL_PLANE_ROOT and ITERABASE_CHARTS_ROOT")
+	}
+	if controlPlaneRoot == "" {
+		return toolRunnerArtifacts{
+			controlChartRef:         "oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane",
+			controlChartVersion:     controlPlaneChartVersion(t, ""),
+			certificateChartRef:     "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate",
+			certificateChartVersion: platformChartVersion(t, ""),
+		}
+	}
+	for label, path := range map[string]string{"control-plane": controlPlaneRoot, "iterabase-charts": chartsRoot} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s checkout %q unavailable: %v", label, path, err)
+		}
+	}
+	controlChart := filepath.Join(chartsRoot, "charts", "control-plane")
+	certificateChart := filepath.Join(chartsRoot, "charts", "cert-manager-substrate")
+	return toolRunnerArtifacts{
+		sourceComposed:        true,
+		controlPlaneRoot:      controlPlaneRoot,
+		controlChartRef:       controlChart,
+		controlChartLocal:     controlChart,
+		certificateChartRef:   certificateChart,
+		certificateChartLocal: certificateChart,
+	}
+}
+
+func buildToolRunnerImages(t *testing.T, controlPlaneRoot, controlImage, runnerImage string) {
 	t.Helper()
 	command(t, "docker", "build", "-t", controlImage, controlPlaneRoot)
 	command(t, "docker", "build", "-t", runnerImage, "-f", filepath.Join(controlPlaneRoot, "tool-runner", "Dockerfile"), filepath.Join(controlPlaneRoot, "tool-runner"))
+}
+
+func buildToolGitImage(t *testing.T, gitImage string) {
+	t.Helper()
 	contextDir := t.TempDir()
 	mustWriteFile(t, filepath.Join(contextDir, "Dockerfile"), "FROM alpine:3.20\nRUN apk add --no-cache git openssh\n")
 	command(t, "docker", "build", "-t", gitImage, contextDir)

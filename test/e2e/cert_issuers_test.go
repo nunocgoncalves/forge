@@ -21,17 +21,15 @@ import (
 //
 // The umbrella chart is published at
 // oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform. Platform
-// 0.3+ publishes cert-manager-substrate at the same version. By default the chart
-// version is auto-resolved to the latest stable release; override via env for
-// local dev/pinning: ITERABASE_PLATFORM_LOCAL_CHART points at a checkout (helm
+// 0.3+ publishes cert-manager-substrate at the same version. PR tests use the
+// coordinated local chart when supplied by CI, otherwise the reviewed pinned
+// release; the scheduled compatibility matrix opts into latest stable. Override
+// for local dev/pinning: ITERABASE_PLATFORM_LOCAL_CHART points at a checkout (helm
 // installs the path directly), ITERABASE_CHART_VERSION pins a specific release.
 func runCertIssuers(t *testing.T) {
 	chartRef := envOr("ITERABASE_PLATFORM_CHART", "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform")
 	localChart := os.Getenv("ITERABASE_PLATFORM_LOCAL_CHART") // optional local path for dev
-	chartVersion := os.Getenv("ITERABASE_CHART_VERSION")
-	if chartVersion == "" && localChart == "" {
-		chartVersion = kindtest.LatestChartVersion(t, "iterabase-platform")
-	}
+	chartVersion := platformChartVersion(t, localChart)
 
 	namespace := "iterabase-system"
 

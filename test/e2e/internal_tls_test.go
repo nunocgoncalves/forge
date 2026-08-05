@@ -44,10 +44,7 @@ import (
 func runInternalTLS(t *testing.T) {
 	chartRef := envOr("ITERABASE_PLATFORM_CHART", "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform")
 	localChart := os.Getenv("ITERABASE_PLATFORM_LOCAL_CHART") // optional local path for dev
-	chartVersion := os.Getenv("ITERABASE_CHART_VERSION")
-	if chartVersion == "" && localChart == "" {
-		chartVersion = kindtest.LatestChartVersion(t, "iterabase-platform")
-	}
+	chartVersion := platformChartVersion(t, localChart)
 
 	namespace := "iterabase-system"
 	release := "iterabase"

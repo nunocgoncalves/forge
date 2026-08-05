@@ -10,6 +10,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -35,12 +36,6 @@ const (
 	size    = "s-2vcpu-4gb" // full stack + MetalLB needs headroom; s-1vcpu-2gb timed out on helm --wait
 	image   = "ubuntu-24-04-x64"
 	k3sPort = 6443
-
-	// The generic cloud scaffold is a local file:// overlay and intentionally
-	// predates the 0.3 exact-Flux generation contract. Keep these substrate
-	// scenarios on the last compatible chart; the 0.3+ path is covered by the
-	// dedicated tool-runner contract and OPO1 production-reference validation.
-	cloudBaselineChartVersion = "0.2.2"
 )
 
 type digitalOceanCPUState struct {
@@ -72,22 +67,20 @@ func runDigitalOceanCPU(t *testing.T) {
 	}
 	state.pubKey, state.privKeyPath = generateKey(t)
 	state.forgeBin = buildForge(t)
-	state.chartVersion = os.Getenv("ITERABASE_CHART_VERSION")
-	if state.chartVersion == "" {
-		state.chartVersion = cloudBaselineChartVersion
-	}
+	state.chartVersion = platformChartVersion(t, "")
 	t.Logf("run %s (keep=%v)", state.runID, state.keep)
 	t.Cleanup(func() { state.cleanup(t) })
 
 	runner.RunStages(t, state,
 		runner.Stage[*digitalOceanCPUState]{Name: "provision-host", Run: provisionCPUStage},
 		runner.Stage[*digitalOceanCPUState]{Name: "reject-gpu-on-cpu-host", Run: rejectGPUOnCPUStage},
-		runner.Stage[*digitalOceanCPUState]{Name: "apply-baseline", Run: applyBaselineStage},
-		runner.Stage[*digitalOceanCPUState]{Name: "assert-baseline", Run: assertBaselineStage},
-		runner.Stage[*digitalOceanCPUState]{Name: "reapply-idempotently", Run: reapplyBaselineStage},
-		runner.Stage[*digitalOceanCPUState]{Name: "apply-public-overlay", Run: runOverlayStage},
+		runner.Stage[*digitalOceanCPUState]{Name: "install-migration-source", Run: applyBaselineStage},
+		runner.Stage[*digitalOceanCPUState]{Name: "assert-migration-source-edge", Run: assertBaselineStage},
+		runner.Stage[*digitalOceanCPUState]{Name: "upgrade-current-with-exact-flux", Run: runOverlayStage},
+		runner.Stage[*digitalOceanCPUState]{Name: "assert-current-platform", Run: assertCurrentPlatformStage},
+		runner.Stage[*digitalOceanCPUState]{Name: "reapply-current-idempotently", Run: reapplyCurrentPlatformStage},
 		runner.Stage[*digitalOceanCPUState]{Name: "sync-secrets", Run: runSecretsStage},
-		runner.Stage[*digitalOceanCPUState]{Name: "install-and-reconcile-flux", Run: runFluxStage},
+		runner.Stage[*digitalOceanCPUState]{Name: "reconcile-flux", Run: runFluxStage},
 	)
 }
 
@@ -135,7 +128,7 @@ func applyBaselineStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
 	writeEdgeOverlayOnHost(t, state.ip, state.privKeyPath)
 	out := applyWithRetry(t, state.forgeBin, state.forgeHome,
-		writeForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion))
+		writeForgeConfig(t, state.runID, state.ip, state.privKeyPath, certificateMigrationSourceVersion))
 	assertApplyMarkers(t, out, "node ready: true", "chart applied: true", "overlay applied: true")
 	t.Logf("apply output:\n%s", out)
 }
@@ -148,11 +141,53 @@ func assertBaselineStage(t *testing.T, state *digitalOceanCPUState) {
 	checkGatewayHealth(t, state.ip)
 }
 
-func reapplyBaselineStage(t *testing.T, state *digitalOceanCPUState) {
+func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
+	t.Helper()
+	sc, err := sshDial(state.ip, state.privKeyPath)
+	if err != nil {
+		t.Fatalf("ssh dial %s: %v", state.ip, err)
+	}
+	defer sc.Close()
+
+	assertRemoteHelmChartVersion(t, sc, state.runID, "iterabase-system", state.chartVersion)
+	assertRemoteHelmChartVersion(t, sc, state.runID+"-cert-manager", "iterabase-system", state.chartVersion)
+	owner := strings.TrimSpace(mustSSHOutput(t, sc,
+		`sudo k3s kubectl get crd certificates.cert-manager.io -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}'`))
+	wantOwner := state.runID + "-cert-manager"
+	if owner != wantOwner {
+		t.Fatalf("certificate CRD release owner = %q, want %q", owner, wantOwner)
+	}
+	ready, revision, digest := pollFluxReady(t, sc, "gitrepository", "overlay", 2*time.Minute)
+	if !ready || revision == "" || !isCanonicalSHA256Digest(digest) {
+		t.Fatalf("current platform has no exact Ready Flux artifact: ready=%v revision=%q digest=%q", ready, revision, digest)
+	}
+	mustSSHOutput(t, sc, fmt.Sprintf("sudo k3s kubectl rollout status -n iterabase-system deployment/%s-tool-runner --timeout=300s", state.runID))
+
+	kcPath := filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml")
+	checkGatewayRunning(t, kcPath)
+	checkGatewayNodePortHealth(t, kcPath, state.ip)
+}
+
+func reapplyCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
 	out := applyWithRetry(t, state.forgeBin, state.forgeHome,
-		writeForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion))
-	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "chart applied: true", "overlay applied: true")
+		writeCurrentOverlayForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion))
+	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
+		"chart applied: true", "overlay applied: true", "flux installed: true")
+}
+
+func assertRemoteHelmChartVersion(t *testing.T, sc *ssh.Client, release, namespace, want string) {
+	t.Helper()
+	out := mustSSHOutput(t, sc, fmt.Sprintf("sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm get metadata %s -n %s -o json", release, namespace))
+	var metadata struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(out), &metadata); err != nil {
+		t.Fatalf("decode Helm metadata for %s: %v\n%s", release, err, out)
+	}
+	if metadata.Version != want {
+		t.Fatalf("Helm release %s chart version = %q, want %q", release, metadata.Version, want)
+	}
 }
 
 func assertApplyMarkers(t *testing.T, out string, markers ...string) {
@@ -502,20 +537,49 @@ func checkGatewayRunning(t *testing.T, kcPath string) {
 
 func checkGatewayHealth(t *testing.T, ip string) {
 	t.Helper()
-	// Reach the gateway over the real HTTPS edge: Host + SNI = gateway.iterabase.local
-	// (the chart default), pinned to the droplet IP - the MetalLB-assigned LoadBalancer
-	// IP on this single-node cluster (kube-proxy DNATs <ip>:443 to ingress-nginx).
-	// InsecureSkipVerify: the edge uses the self-signed issuer (kind/E2E).
+	// The migration source proves the real MetalLB edge on 443.
+	checkGatewayHealthOnPort(t, ip, 443)
+}
+
+func checkGatewayNodePortHealth(t *testing.T, kcPath, ip string) {
+	t.Helper()
+	restCfg, err := clientcmd.BuildConfigFromFlags("", kcPath)
+	if err != nil {
+		t.Fatalf("build kubeconfig: %v", err)
+	}
+	cs, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		t.Fatalf("new clientset: %v", err)
+	}
+	services, err := cs.CoreV1().Services("iterabase-system").List(context.Background(), metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=ingress-nginx,app.kubernetes.io/component=controller",
+	})
+	if err != nil || len(services.Items) != 1 {
+		t.Fatalf("resolve ingress controller Service: count=%d err=%v", len(services.Items), err)
+	}
+	for _, port := range services.Items[0].Spec.Ports {
+		if port.Port == 443 && port.NodePort > 0 {
+			checkGatewayHealthOnPort(t, ip, int(port.NodePort))
+			return
+		}
+	}
+	t.Fatalf("ingress controller Service has no HTTPS NodePort: %+v", services.Items[0].Spec.Ports)
+}
+
+func checkGatewayHealthOnPort(t *testing.T, ip string, port int) {
+	t.Helper()
+	// Reach the gateway over the real HTTPS ingress with the chart's default Host
+	// and SNI. The E2E edge uses a self-signed issuer.
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // self-signed e2e cert
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ip, "443"))
+			return dialer.DialContext(ctx, network, net.JoinHostPort(ip, fmt.Sprintf("%d", port)))
 		},
 	}
 	client := &http.Client{Timeout: 10 * time.Second, Transport: transport}
 	url := "https://gateway.iterabase.local/health"
-	deadline := time.Now().Add(180 * time.Second) // MetalLB LB-IP + cert issuance + ingress sync
+	deadline := time.Now().Add(180 * time.Second)
 	for time.Now().Before(deadline) {
 		resp, err := client.Get(url)
 		if err == nil {
@@ -526,7 +590,7 @@ func checkGatewayHealth(t *testing.T, ip string) {
 		}
 		time.Sleep(3 * time.Second)
 	}
-	t.Fatalf("gateway /health not 200 via %s (ip %s)", url, ip)
+	t.Fatalf("gateway /health not 200 via %s (ip %s port %d)", url, ip, port)
 }
 
 // writeEdgeOverlayOnHost creates a file:// overlay git repo on the droplet with

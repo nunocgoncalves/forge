@@ -40,10 +40,10 @@ import (
 // completion. The real serving path is covered by TestInferenceFlowGPU.
 //
 // The umbrella chart is published at
-// oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform. By default
-// the chart version is auto-resolved from the charts repo's latest stable
-// GitHub release (HOR-321); the umbrella bakes in the control-plane + gateway
-// subcharts at matching image tags, so no image override is needed. Override
+// oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform. PR tests
+// use coordinated chart source when available and the reviewed pinned release
+// otherwise; the scheduled compatibility matrix opts into latest stable. The
+// umbrella bakes in matching control-plane + gateway image tags. Override
 // via env for local dev / pinning: ITERABASE_LOCAL_CHART points at a checkout,
 // ITERABASE_LOCAL_IMAGE loads a locally-built image into the Kind nodes, and
 // ITERABASE_CHART_VERSION pins a specific release.
@@ -51,10 +51,7 @@ func runInferenceFlowContract(t *testing.T) {
 	// --- chart config (env-overridable) ---
 	chartRef := envOr("ITERABASE_CHART", "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform")
 	localChart := os.Getenv("ITERABASE_LOCAL_CHART")
-	chartVersion := os.Getenv("ITERABASE_CHART_VERSION")
-	if chartVersion == "" && localChart == "" {
-		chartVersion = kindtest.LatestChartVersion(t, "iterabase-platform")
-	}
+	chartVersion := platformChartVersion(t, localChart)
 
 	namespace := "iterabase-system"
 	release := "itb"

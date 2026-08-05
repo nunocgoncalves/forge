@@ -5,12 +5,10 @@ import (
 	"testing"
 )
 
-// runOverlayStage exercises forge apply --overlay on the composed CPU fixture:
-// droplet: it clones the PUBLIC iterabase-overlay base repo tokenlessly on the
-// host, feeds its value files to the platform chart (helm -f), and applies its
-// CRD instances (kubectl apply -k crds/client/). The scaffold's crds/client/ is
-// empty + values are comment-only, so this validates the MECHANICS on a real
-// host (clone → helm -f → kubectl apply -k) rather than a specific instance.
+// runOverlayStage upgrades the composed CPU fixture from the migration source
+// to the current platform through Forge's production ordering: clone the public
+// fixture, install the certificate substrate, establish an exact Flux artifact,
+// migrate certificate ownership, apply the platform, then reconcile its CRs.
 //
 // It points at ref `e2e` (a minimal-scaffold test-fixture branch): `master` holds
 // the HOR-299 bare-metal prod recipe (required placeholders, not deployable bare
@@ -24,9 +22,10 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 		t.Fatal("FORGE_OVERLAY_TOKEN must be unset for this test (public repo, tokenless)")
 	}
 
-	cfgPath := writeOverlayForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion)
+	cfgPath := writeCurrentOverlayForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion)
 	out := applyWithRetry(t, state.forgeBin, state.forgeHome, cfgPath)
-	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "chart applied: true", "overlay applied: true", "overlay commit:")
+	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
+		"chart applied: true", "overlay applied: true", "overlay commit:", "flux installed: true", "gitrepository: ready=True")
 	t.Logf("apply output:\n%s", out)
 
 	// The cloned overlay dir exists on the host (a real clone happened).
@@ -41,13 +40,15 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	}
 }
 
-// writeOverlayForgeConfig writes a forge.yaml identical to the baseline e2e
-// config but with the public iterabase-overlay repo configured.
-func writeOverlayForgeConfig(t *testing.T, name, ip, keyPath, chartVersion string) string {
+// writeCurrentOverlayForgeConfig uses the public exact-Flux fixture. Until its
+// fixture PR lands on e2e, FORGE_E2E_OVERLAY_REF can select the coordinated
+// ticket branch; the committed default returns to e2e before this PR merges.
+func writeCurrentOverlayForgeConfig(t *testing.T, name, ip, keyPath, chartVersion string) string {
 	return writeForgeConfigSpec(t, forgeConfigSpec{
 		Name: name, Address: ip, SSHKeyPath: keyPath, RunLabel: true, DualStack: true,
 		ChartVersion: chartVersion,
 		OverlayRepo:  "https://github.com/nunocgoncalves/iterabase-overlay.git",
-		OverlayRef:   "e2e",
+		OverlayRef:   envOr("FORGE_E2E_OVERLAY_REF", "HOR-397-forge-e2e-tool-fixture"),
+		Flux:         true,
 	})
 }

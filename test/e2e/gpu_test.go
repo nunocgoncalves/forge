@@ -161,10 +161,7 @@ func runDigitalOceanGPU(t *testing.T) {
 		forgeBin:    buildForge(t),
 		forgeHome:   t.TempDir(),
 	}
-	state.chartVersion = os.Getenv("ITERABASE_CHART_VERSION")
-	if state.chartVersion == "" {
-		state.chartVersion = cloudBaselineChartVersion
-	}
+	state.chartVersion = platformChartVersion(t, "")
 
 	vm, err := state.provisioner.Provision(ctx, state.runID, pubKey, privKeyPath)
 	if errors.Is(err, ErrNoGPUCapacity) {

@@ -21,14 +21,15 @@ Stages:
 
 1. Provision a cloud-init-complete CPU host.
 2. Assert `gpu.enabled` is rejected when no NVIDIA GPU exists.
-3. Apply the baseline k3s + chart + local edge overlay.
+3. Install the explicit `0.2.2` migration source with the local MetalLB edge overlay.
 4. Assert node readiness, dual-stack pod CIDRs, label propagation, gateway pod readiness, and HTTPS/MetalLB health.
-5. Re-apply and assert the reality-derived action is `skip` while configured phases reconcile successfully.
-6. Apply the public overlay tokenlessly and assert commit/clone/chart/CRD mechanics.
-7. Materialize an overlay-declared Secret from an operator environment variable and verify its value/type.
-8. Install Flux and assert controllers, source artifact, and Kustomization readiness.
+5. Upgrade to the reviewed current platform release through the public E2E overlay: exact Flux source first, certificate ownership handoff, companion substrate, platform, then CR reconciliation.
+6. Assert both Helm versions, certificate CRD ownership, exact Flux revision/digest, tool-runner readiness, and HTTPS health through the fixture's NodePort edge.
+7. Re-apply the current release and assert the reality-derived action is `skip` while every configured phase reconciles successfully.
+8. Materialize an overlay-declared Secret from an operator environment variable and verify its value/type.
+9. Reconcile Flux again and assert controllers, source artifact, and Kustomization readiness.
 
-Only baseline needs a fresh host. Overlay, secret-sync, and Flux are phases on a ready forge substrate; separate VMs repeated k3s installation without testing another boundary. The composed flow also exercises real re-entry between configs.
+The old release is an intentional migration input, never the desired test target. Only migration setup needs a fresh host. Current-platform, secret-sync, and Flux checks compose on that host so this scenario covers the exact `0.2.2` → `0.3+` ownership and Helm-status path used by OPO1.
 
 ### DigitalOcean GPU — one VM
 
@@ -36,7 +37,7 @@ Stages:
 
 1. Apply k3s + GPU operator without the platform chart.
 2. Assert ClusterPolicy readiness and run a real GPU smoke pod.
-3. Reconcile the platform chart on the same host with the already-proven GPU phase skipped.
+3. Reconcile the reviewed current platform release on the same host with exact Flux source + companion certificate substrate and the already-proven GPU phase skipped.
 4. Apply identity/catalog resources, wait for real vLLM availability, assert rendered extra arguments, and request a real completion.
 
 The inference path depends on GPU readiness, so a second VM/operator installation added cost and capacity noise rather than isolation. The chart is introduced only after the substrate smoke assertion, preserving fault localization.
@@ -55,7 +56,7 @@ These remain isolated because clean chart installation, cluster-scoped CRDs/issu
 
 | Previous test | New scenario/stage | Coverage |
 |---|---|---|
-| `TestE2E` | `digitalocean-cpu/apply-baseline`, `assert-baseline` | k3s, chart, overlay, node, dual-stack, label, gateway edge |
+| `TestE2E` | `digitalocean-cpu/install-migration-source` through `reapply-current-idempotently` | k3s, real Helm 4 migration, certificate handoff, exact Flux source, runner readiness, overlay, node, dual-stack, and gateway edges |
 | `TestGPUE2E_PreflightFail` | `digitalocean-cpu/reject-gpu-on-cpu-host` | no-GPU preflight refusal; now actually selected by CI |
 | `TestE2EOverlay` | `digitalocean-cpu/apply-public-overlay` | public tokenless clone, commit, values, CRD path |
 | `TestE2ESecrets` | `digitalocean-cpu/sync-secrets` | env → SSH stdin → Kubernetes Secret |
@@ -73,11 +74,14 @@ These remain isolated because clean chart installation, cluster-scoped CRDs/issu
 One `e2e.yml` workflow owns:
 
 - fast harness compilation, unit tests, and nested-module lint;
-- one serialized CPU cloud job;
-- one serialized GPU cloud job;
-- a fail-fast-disabled Kind matrix with one fresh runner/cluster per contract; the tool-runner contract checks out coordinated control-plane and chart sources and builds their images locally.
+- one serialized CPU cloud job against reviewed published releases;
+- one serialized GPU cloud job against reviewed published releases;
+- a fail-fast-disabled Kind PR matrix with one fresh runner/cluster per contract;
+- a nightly, non-PR-gating Kind compatibility matrix against latest stable published artifacts.
 
-All E2E invocations are verbose so capacity skips and stage results are visible. Cloud jobs never cancel in progress, allowing test cleanup to destroy VMs; the tagged reaper remains the crash safety net.
+For a ticket PR, the Kind matrix composes matching `HOR-*` control-plane and chart branches when both exist. If either counterpart is absent, it falls back as one unit to explicit reviewed release pins. Standard Kind scenarios install coordinated chart source; the tool-runner contract additionally builds the coordinated control-plane and runner images. Cloud jobs intentionally use distributable releases because their boundary is Forge's real remote OCI installation path, not local source mounting.
+
+The nightly compatibility matrix is the only floating-latest consumer. It detects release drift without making an unrelated release silently change another PR's required checks. All E2E invocations are verbose so capacity skips and stage results are visible. Cloud jobs never cancel in progress, allowing test cleanup to destroy VMs; the tagged reaper remains the crash safety net.
 
 ## Rejected alternatives
 
